@@ -39,14 +39,25 @@ LAST_DURATION=$(echo "$LAST_LOGIN" | awk '{print $10}')
 
 # Betriebssystemversion
 CURRENT_VERSION=$(lsb_release -r | awk '{print $2}')
-VERSION_LATEST=$(curl -s "https://releases.ubuntu.com/" | grep -Po 'Ubuntu \K[0-9]+\.[0-9]+' | sort -V | tail -n 1)  # Prüft die neueste Ubuntu-Version
+if [[ "$OS_VERSION" == *"Ubuntu"* ]]; then
+    VERSION_LATEST=$(curl -s "https://releases.ubuntu.com/" | grep -Po 'Ubuntu \K[0-9]+\.[0-9]+' | sort -V | tail -n 1)
+elif [[ "$OS_VERSION" == *"Debian"* ]]; then
+    VERSION_LATEST=$(curl -s "https://www.debian.org/releases/" | grep -Po 'Debian GNU/Linux \K[0-9]+' | sort -V | tail -n 1)
+else
+    VERSION_LATEST="Unbekannt"
+fi
 
-# Funktion zur farbigen Ausgabe des Betriebssystemstatus
+# Funktion zur farbigen Ausgabe des Betriebssystemstatus und Upgrade-Hinweis
 function display_os_version_status {
     if [ "$CURRENT_VERSION" = "$VERSION_LATEST" ]; then
         echo -e "\e[32m$OS_VERSION (aktuell)\e[0m"  # Grün für die neueste Version
     else
         echo -e "\e[31m$OS_VERSION (nicht aktuell - neueste Version: $VERSION_LATEST)\e[0m"  # Rot für veraltete Version
+        if [[ "$OS_VERSION" == *"Ubuntu"* ]]; then
+            echo -e "Zum Upgrade auf die neueste Version verwenden Sie: \e[34msudo do-release-upgrade\e[0m"
+        elif [[ "$OS_VERSION" == *"Debian"* ]]; then
+            echo -e "Zur Aktualisierung auf die neueste Version ändern Sie die Quellenliste und verwenden Sie:\n\e[34msudo apt update && sudo apt full-upgrade\e[0m"
+        fi
     fi
 }
 
@@ -69,12 +80,23 @@ function draw_bar {
     echo -e "[${color}${bar:0:filled_length}\e[0m\e[90m${bar:filled_length:$((bar_length-filled_length))}\e[0m] $usage%"
 }
 
-# Funktion zur farbigen Ausgabe des Fail2Ban-Status
+# Funktion zur farbigen Ausgabe des Fail2Ban-Status und Statistiken
 function display_fail2ban_status {
     if [ "$FAIL2BAN_STATUS" = "active" ]; then
-        echo -e "\e[32m$FAIL2BAN_STATUS\e[0m"  # Grün für aktiv
+        echo -e "\e[32mFail2Ban ist aktiv\e[0m"
+        
+        # Anzeige der Jails und der gesperrten IP-Adressen
+        JAILS=$(fail2ban-client status | grep 'Jail list:' | cut -d ':' -f2 | tr -d ',' | xargs)
+        for JAIL in $JAILS; do
+            BANNED_IPS=$(fail2ban-client status "$JAIL" | grep 'Banned IP list:' | cut -d ':' -f2)
+            BAN_COUNT=$(echo "$BANNED_IPS" | wc -w)
+            echo -e "\e[34mJail: $JAIL - Gesperrte IPs: $BAN_COUNT\e[0m"
+            if [ "$BAN_COUNT" -gt 0 ]; then
+                echo -e "\e[90m$BANNED_IPS\e[0m"
+            fi
+        done
     else
-        echo -e "\e[31m$FAIL2BAN_STATUS\e[0m"  # Rot für inaktiv oder Fehler
+        echo -e "\e[31mFail2Ban ist inaktiv\e[0m"
     fi
 }
 
