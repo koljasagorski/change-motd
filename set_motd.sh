@@ -80,8 +80,10 @@ detect_distro() {
 # --- Dependency installer ---------------------------------------------------
 
 PACKAGES=(figlet curl ca-certificates fortunes-min lsb-release bsdmainutils)
-# Optional but recommended: jq for nicer geo-IP parsing.
-OPTIONAL_PACKAGES=(jq lm-sensors)
+# Optional but recommended: jq (geo-IP), lm-sensors (temps/fans), smartmontools
+# (SMART health), wireguard-tools (VPN status), iproute2 (network info),
+# sysstat (load history sparkline).
+OPTIONAL_PACKAGES=(jq lm-sensors smartmontools wireguard-tools iproute2 sysstat)
 
 install_packages() {
     log "Installiere Pakete: ${PACKAGES[*]}"
@@ -174,6 +176,32 @@ EOF
 
 # Weather city for the wttr.in line. Leave empty to disable.
 MOTD_WEATHER_CITY=""
+
+# Host to ping for latency display (default 1.1.1.1).
+MOTD_PING_HOST="1.1.1.1"
+
+# Path whose mtime represents the last backup. Empty to disable.
+MOTD_BACKUP_PATH=""
+
+# Space-separated list of domains for TLS-expiry checks. Empty to disable.
+MOTD_CERT_DOMAINS=""
+
+# Color theme: catppuccin | synthwave | dracula | nord | gruvbox | auto
+# 'auto' rotates the theme weekly.
+MOTD_THEME="auto"
+
+# Login animation for the hostname banner:
+#   off (default) | matrix | decrypt | glitch | type | boot
+MOTD_ANIMATE="off"
+
+# Animate the resource bars (1 = on, 0 = off).
+MOTD_ANIMATE_BARS="0"
+
+# Sparklines for load average and SSH-attempt history.
+MOTD_SPARKLINES="1"
+
+# Show the "on this day in tech history" footer line.
+MOTD_FUNFACT="1"
 
 # Cache directory for expensive external calls.
 MOTD_CACHE_DIR="/var/cache/motd"
