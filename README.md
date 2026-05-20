@@ -13,34 +13,62 @@
    |_| \_|\___|_|  \__,_|\__, ||____/ \___|_|    \_/ \___|_|
                          |___/
 
-    Debian 12 (bookworm)  ·    Mon 19 May 2026 · 14:32:01 CEST
+    Debian 12 (bookworm)  ·    Mon 19 May 2026 · 14:32:01 CEST  ·    catppuccin theme
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+  ▎  Needs Attention ────────────────────────────────────────────────────
+       Reboot       required — 3 packages
+       Units        1 failed   nginx.service
+
   ▎  System ─────────────────────────────────────────────────────────────
        OS           Debian 12 (bookworm)   up to date
-       Kernel       6.1.0-21-amd64
+       Kernel       6.1.0-21-amd64 (x86_64)
+       CPU          Intel(R) Xeon(R) E-2236 @ 3.40GHz — 6c/12t
+       Virt         kvm
        Uptime       3 days, 4 hours
-       Load         0.42 · 0.51 · 0.48
-       Users        2 logged in
+       Load         0.42 · 0.51 · 0.48  ▆█▃
+       Sessions     2 active
 
   ▎  Resources ──────────────────────────────────────────────────────────
-       CPU          [██████████░░░░░░░░░░░░░░]  42%
+       CPU          [██████████░░░░░░░░░░░░░░]  42%  🙂
        Memory       [████████████████░░░░░░░░]  67%   3.2 / 4.8 GiB
+       Swap         [██░░░░░░░░░░░░░░░░░░░░░░]   8%   0.1 / 1.0 GiB
        Disk /       [██████░░░░░░░░░░░░░░░░░░]  25%  12.0 / 48.0 GiB
-       Temp         45°C
+       Disk /data   [████████░░░░░░░░░░░░░░░░]  31%  62.0 / 200.0 GiB
+       Temp         45°C  · board 38°C · fan 1240 RPM
+       SMART        sda:PASSED nvme0n1:PASSED
 
   ▎  Network ────────────────────────────────────────────────────────────
        IPv4         192.168.1.42   → router.local
        External     203.0.113.5    → mail.example.com    DE · Berlin
+       Gateway      192.168.1.1
+       DNS          1.1.1.1
+       Link         eth0 @ 1000 Mbit/s
+       Ping         3.2 ms to 1.1.1.1
+       Traffic      ↓ 84.3 GiB  ↑ 12.1 GiB  since boot
+       Sockets      42 est.  17 listening
 
   ▎  Security ───────────────────────────────────────────────────────────
        Fail2Ban     ✓ active — 3 jails, 17 banned
-       SSH (24h)    14 failed attempts
+       SSH (24h)    14 failed  ▁▂▁▃▂▁▂█▃▁▁▂
+       Active       admin@10.0.0.42
+       UFW          active
+       MAC          AppArmor:on(94)
+       NTP          synced
        Tor          ✓ active
 
+  ▎  TLS Certificates ───────────────────────────────────────────────────
+       example.com           67 days
+       api.example.com       23 days
+
+  ▎  Schedule ───────────────────────────────────────────────────────────
+       Backup       4 h ago — /var/backups/restic.log
+       Next job     certbot.timer — Tue 2026-05-20 02:14:00
+
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-     Berlin: ☀ +18°C
+     Berlin: ☀ +18°C  →16km/h  43%
+     1989 — Tim Berners-Lee proposes the World Wide Web at CERN
      Talk is cheap. Show me the code. — Linus Torvalds
 ```
 
@@ -113,7 +141,7 @@ sudo bash /tmp/set_motd.sh
 
 Der Installer:
 
-1. installiert die nötigen Pakete (`figlet`, `curl`, `jq`, `lm-sensors`, `fortunes-min`, …),
+1. installiert die Kern-Pakete (`figlet`, `curl`, `ca-certificates`, `fortunes-min`, `lsb-release`, `bsdmainutils`) sowie — soweit verfügbar — die optionalen Pakete (s. u.),
 2. legt das bisherige `/etc/motd` unter `/var/backups/motd/` ab,
 3. deaktiviert die Default-Skripte in `/etc/update-motd.d/`,
 4. installiert
@@ -124,6 +152,23 @@ Der Installer:
 5. aktiviert den **systemd-Timer** für Auto-Updates (s. u.).
 
 Beim nächsten SSH-Login erscheint das neue MOTD.
+
+### Optionale Pakete
+
+Werden automatisch mitinstalliert, sind aber nicht zwingend — fehlt eines, wird die entsprechende Sektion einfach ausgeblendet:
+
+| Paket              | Aktiviert                                              |
+| ------------------ | ------------------------------------------------------ |
+| `jq`               | Sauberere Geo-IP-JSON-Parsing                          |
+| `lm-sensors`       | CPU-/Mainboard-Temperatur und Lüfter-RPM               |
+| `smartmontools`    | SMART-Health aller Disks                               |
+| `wireguard-tools`  | WireGuard-VPN-Erkennung                                |
+| `iproute2`         | Gateway, IPv6, Link-Speed (auf den meisten Distros vorinstalliert) |
+| `sysstat`          | Längere Load-History für die Sparkline (`sar`)         |
+| `fail2ban`         | Fail2Ban-Sektion (Jails, gesperrte IPs)                |
+| `tor`              | Tor-Status-Zeile                                       |
+| `docker`           | Container-Sektion                                      |
+| `nvidia-utils-*`   | GPU-Modell, -Temperatur, -Auslastung                   |
 
 ---
 
@@ -276,6 +321,7 @@ her und deaktiviert den Auto-Update-Timer.
 | `--no-timer`          | Installation **ohne** Auto-Update-Timer                |
 | `--branch <name>`     | Aus einem anderen GitHub-Branch installieren           |
 | `--uninstall`         | Alles entfernen, vorheriges MOTD wiederherstellen      |
+| `--help`, `-h`        | Hilfetext anzeigen                                     |
 
 ---
 
