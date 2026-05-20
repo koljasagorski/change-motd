@@ -1,0 +1,653 @@
+#!/usr/bin/env bash
+# motd-generate — A beautiful, nerdy Message of the Day for Linux servers
+# https://github.com/koljasagorski/change-motd
+#
+# This script is intended to be called by /etc/update-motd.d/ so the MOTD
+# regenerates on every login. It writes the rendered MOTD to stdout.
+
+set -uo pipefail
+export LC_ALL=C.UTF-8 LANG=C.UTF-8
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+readonly MOTD_VERSION="2.0.0"
+readonly CACHE_DIR="${MOTD_CACHE_DIR:-/var/cache/motd}"
+readonly HTTP_TIMEOUT="${MOTD_HTTP_TIMEOUT:-3}"
+
+# TTLs (seconds) for cached external calls.
+readonly TTL_EXTIP=3600
+readonly TTL_GEOIP=86400
+readonly TTL_RELEASE=86400
+readonly TTL_WEATHER=1800
+readonly TTL_UPDATES=600
+
+# /etc/default/motd may override MOTD_WEATHER_CITY, MOTD_HTTP_TIMEOUT, etc.
+[[ -r /etc/default/motd ]] && . /etc/default/motd
+
+WEATHER_CITY="${MOTD_WEATHER_CITY:-}"
+
+WIDTH="$(tput cols 2>/dev/null || echo 80)"
+[[ -z "$WIDTH" || "$WIDTH" -lt 60 ]] && WIDTH=80
+readonly WIDTH
+
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+
+# =============================================================================
+# Colors (24-bit truecolor — Catppuccin-inspired)
+# =============================================================================
+
+readonly NC=$'\e[0m'
+readonly BOLD=$'\e[1m'
+readonly DIM=$'\e[2m'
+
+readonly C_RED=$'\e[38;2;243;139;168m'
+readonly C_GREEN=$'\e[38;2;166;227;161m'
+readonly C_YELLOW=$'\e[38;2;249;226;175m'
+readonly C_BLUE=$'\e[38;2;137;180;250m'
+readonly C_PURPLE=$'\e[38;2;203;166;247m'
+readonly C_CYAN=$'\e[38;2;137;220;235m'
+readonly C_PINK=$'\e[38;2;245;194;231m'
+readonly C_TEAL=$'\e[38;2;148;226;213m'
+readonly C_GRAY=$'\e[38;2;127;132;156m'
+readonly C_DIM=$'\e[38;2;88;91;112m'
+readonly C_FG=$'\e[38;2;205;214;244m'
+
+# Gradient palette for the hostname banner (RGB triplets).
+readonly GRADIENT=(
+    "245;194;231"
+    "203;166;247"
+    "137;180;250"
+    "137;220;235"
+    "148;226;213"
+    "166;227;161"
+)
+
+# =============================================================================
+# Icons (Nerd Font recommended; falls back to plain text on non-NF terminals)
+# =============================================================================
+
+readonly I_OS=""
+readonly I_KERNEL=""
+readonly I_UPTIME=""
+readonly I_USER=""
+readonly I_LOAD=""
+readonly I_CPU=""
+readonly I_RAM=""
+readonly I_DISK=""
+readonly I_TEMP=""
+readonly I_NET=""
+readonly I_GLOBE=""
+readonly I_SHIELD=""
+readonly I_LOCK=""
+readonly I_UPDATE=""
+readonly I_SERVICE=""
+readonly I_LAST=""
+readonly I_PROC=""
+readonly I_TOR=""
+readonly I_WEATHER=""
+readonly I_DOCKER=""
+readonly I_CLOCK=""
+readonly I_FLAG=""
+readonly I_BOLT=""
+readonly I_OK=""
+readonly I_WARN=""
+readonly I_FAIL=""
+
+# =============================================================================
+# Generic helpers
+# =============================================================================
+
+# Strip ANSI escape sequences (for visible-width measurements).
+strip_ansi() {
+    # shellcheck disable=SC2001
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' <<<"$1"
+}
+
+vwidth() {
+    local s
+    s="$(strip_ansi "$1")"
+    printf '%s' "${#s}"
+}
+
+repeat() {
+    local s="$1" n="${2:-0}" out=""
+    (( n < 0 )) && n=0
+    while (( n-- > 0 )); do out+="$s"; done
+    printf '%s' "$out"
+}
+
+# Cache the output of a command on disk. Returns stale cache on failure.
+# Usage: cached <key> <ttl-seconds> -- <cmd> [args...]
+cached() {
+    local key="$1" ttl="$2"
+    shift 2
+    [[ "${1:-}" == "--" ]] && shift
+    local file="$CACHE_DIR/$key"
+    local now age
+    now="$(date +%s)"
+    if [[ -f "$file" ]]; then
+        age=$(( now - $(stat -c %Y "$file" 2>/dev/null || echo 0) ))
+        if (( age < ttl )); then
+            cat "$file"
+            return 0
+        fi
+    fi
+    local out
+    if out="$("$@" 2>/dev/null)" && [[ -n "$out" ]]; then
+        printf '%s' "$out" > "$file" 2>/dev/null || true
+        printf '%s' "$out"
+    elif [[ -f "$file" ]]; then
+        cat "$file"
+    fi
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# =============================================================================
+# Data collection — distro
+# =============================================================================
+
+# Read /etc/os-release into associative-style globals.
+DISTRO_ID="linux"
+DISTRO_PRETTY="Linux"
+DISTRO_VERSION_ID=""
+DISTRO_CODENAME=""
+if [[ -r /etc/os-release ]]; then
+    # shellcheck disable=SC1091
+    . /etc/os-release
+    DISTRO_ID="${ID:-linux}"
+    DISTRO_PRETTY="${PRETTY_NAME:-${NAME:-Linux}}"
+    DISTRO_VERSION_ID="${VERSION_ID:-}"
+    DISTRO_CODENAME="${VERSION_CODENAME:-}"
+fi
+readonly DISTRO_ID DISTRO_PRETTY DISTRO_VERSION_ID DISTRO_CODENAME
+
+# Glyph for distro logo line (uses Nerd Font glyphs when available).
+distro_glyph() {
+    case "$DISTRO_ID" in
+        ubuntu)         printf '' ;;
+        debian)         printf '' ;;
+        raspbian)       printf '' ;;
+        fedora)         printf '' ;;
+        arch|archlinux) printf '' ;;
+        alpine)         printf '' ;;
+        centos)         printf '' ;;
+        rocky|almalinux)printf '' ;;
+        kali)           printf '' ;;
+        manjaro)        printf '' ;;
+        opensuse*|suse) printf '' ;;
+        *)              printf '' ;;
+    esac
+}
+
+# Get latest distro release (cached). Returns empty on failure.
+latest_release() {
+    case "$DISTRO_ID" in
+        ubuntu)
+            cached "ubuntu_latest" "$TTL_RELEASE" -- \
+                bash -c 'curl -fsSL --max-time '"$HTTP_TIMEOUT"' https://releases.ubuntu.com/ \
+                    | grep -Po "Ubuntu \K[0-9]+\.[0-9]+ LTS" \
+                    | sort -V | tail -n1'
+            ;;
+        debian)
+            cached "debian_latest" "$TTL_RELEASE" -- \
+                bash -c 'curl -fsSL --max-time '"$HTTP_TIMEOUT"' https://www.debian.org/releases/stable/ \
+                    | grep -Po "Debian \K[0-9]+(\.[0-9]+)?" \
+                    | sort -V | tail -n1'
+            ;;
+        *) printf '' ;;
+    esac
+}
+
+# =============================================================================
+# Data collection — system & network
+# =============================================================================
+
+ext_ip()   { cached "extip" "$TTL_EXTIP" -- curl -fsSL --max-time "$HTTP_TIMEOUT" https://ifconfig.me; }
+
+geoip() {
+    local ip="$1"
+    [[ -z "$ip" ]] && return 0
+    cached "geo_$ip" "$TTL_GEOIP" -- \
+        curl -fsSL --max-time "$HTTP_TIMEOUT" "https://ipinfo.io/${ip}/json"
+}
+
+geo_country() {
+    local json="$1"
+    [[ -z "$json" ]] && return 0
+    if have jq; then
+        jq -r '.country // empty' <<<"$json" 2>/dev/null
+    else
+        grep -Po '"country"\s*:\s*"\K[^"]+' <<<"$json" | head -n1
+    fi
+}
+
+geo_city() {
+    local json="$1"
+    [[ -z "$json" ]] && return 0
+    if have jq; then
+        jq -r '.city // empty' <<<"$json" 2>/dev/null
+    else
+        grep -Po '"city"\s*:\s*"\K[^"]+' <<<"$json" | head -n1
+    fi
+}
+
+# Reverse DNS lookup, prefers `getent` (no extra DNS round-trip).
+rdns() {
+    local ip="$1"
+    [[ -z "$ip" ]] && return 0
+    if have getent; then
+        getent hosts "$ip" 2>/dev/null | awk '{print $2}' | head -n1
+    elif have host; then
+        host "$ip" 2>/dev/null | awk '/domain name pointer/ {print $5; exit}' | sed 's/\.$//'
+    fi
+}
+
+cpu_pct() {
+    # Single-shot top read is cheap and accurate enough for a MOTD.
+    top -bn1 \
+        | awk -F'[ ,]+' '/Cpu\(s\)/ {for(i=1;i<=NF;i++) if($i~/id/){print int(100 - $(i-1) + 0.5); exit}}'
+}
+
+mem_info() {
+    # Returns: "<pct> <used_gib> <total_gib>"
+    free -b | awk '/^Mem:/ {
+        used=$3; total=$2;
+        printf "%d %.1f %.1f", (used*100/total)+0.5, used/1073741824, total/1073741824
+    }'
+}
+
+disk_info() {
+    # Disk usage for the given path (default /).
+    local path="${1:-/}"
+    df -B1 --output=pcent,used,size "$path" 2>/dev/null | awk 'NR==2 {
+        gsub("%","",$1);
+        printf "%d %.1f %.1f", $1, $2/1073741824, $3/1073741824
+    }'
+}
+
+cpu_temp_c() {
+    # Best-effort temperature in °C (integer). Empty if unknown.
+    local val=""
+    if have sensors; then
+        val="$(sensors 2>/dev/null \
+            | awk '/^(Package id 0|Tctl|Tdie|Core 0):/ {gsub(/\+|°C/,"",$NF); print int($NF+0.5); exit}')"
+    fi
+    if [[ -z "$val" ]]; then
+        for f in /sys/class/thermal/thermal_zone*/temp; do
+            [[ -r "$f" ]] || continue
+            local raw
+            raw="$(cat "$f" 2>/dev/null || true)"
+            [[ "$raw" =~ ^[0-9]+$ ]] || continue
+            val=$(( raw / 1000 ))
+            break
+        done
+    fi
+    printf '%s' "$val"
+}
+
+ipv4_addr() { hostname -I 2>/dev/null | awk '{print $1}'; }
+ipv6_addr() { ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2; exit}' | cut -d/ -f1; }
+
+failed_ssh_24h() {
+    if have journalctl; then
+        journalctl --since "24 hours ago" --no-pager -u ssh -u sshd -u openssh-server 2>/dev/null \
+            | grep -Ec 'Failed (password|publickey)|Invalid user' || true
+    elif [[ -r /var/log/auth.log ]]; then
+        grep -Ec "Failed (password|publickey)|Invalid user" /var/log/auth.log 2>/dev/null || true
+    else
+        printf '0'
+    fi
+}
+
+fail2ban_summary() {
+    have fail2ban-client || return 0
+    [[ "$(systemctl is-active fail2ban 2>/dev/null)" == "active" ]] || return 0
+    local jails banned=0 count=0 j
+    jails="$(fail2ban-client status 2>/dev/null \
+        | awk -F: '/Jail list/ {gsub(/^[ \t]+|,/,"",$2); print $2}')"
+    [[ -z "$jails" ]] && return 0
+    for j in $jails; do
+        local n
+        n="$(fail2ban-client status "$j" 2>/dev/null \
+            | awk -F'[ \t]+' '/Currently banned/ {print $NF}')"
+        [[ "$n" =~ ^[0-9]+$ ]] || n=0
+        banned=$(( banned + n ))
+        count=$(( count + 1 ))
+    done
+    printf '%d %d' "$count" "$banned"
+}
+
+apt_updates() {
+    have apt >/dev/null || return 0
+    cached "apt_updates" "$TTL_UPDATES" -- bash -c '
+        out="$(apt list --upgradable 2>/dev/null | tail -n +2)"
+        all=$(printf "%s\n" "$out" | grep -c .)
+        sec=$(printf "%s\n" "$out" | grep -ci security)
+        printf "%d %d" "$all" "$sec"
+    '
+}
+
+tor_status() {
+    have systemctl || return 0
+    systemctl list-unit-files 2>/dev/null | grep -q '^tor\.service' || return 0
+    if [[ "$(systemctl is-active tor 2>/dev/null)" == "active" ]]; then
+        local circ=""
+        if have nyx; then
+            circ="$(nyx --interface 2>/dev/null | head -c 0)"
+        fi
+        printf 'active %s' "${circ}"
+    else
+        printf 'inactive'
+    fi
+}
+
+docker_status() {
+    have docker || return 0
+    systemctl is-active --quiet docker 2>/dev/null || return 0
+    local running total
+    running="$(docker ps -q 2>/dev/null | wc -l)"
+    total="$(docker ps -aq 2>/dev/null | wc -l)"
+    printf '%s %s' "$running" "$total"
+}
+
+weather_line() {
+    [[ -z "$WEATHER_CITY" ]] && return 0
+    cached "weather_${WEATHER_CITY// /_}" "$TTL_WEATHER" -- \
+        curl -fsSL --max-time "$HTTP_TIMEOUT" "https://wttr.in/${WEATHER_CITY}?format=%l:+%c+%t+%w+%h"
+}
+
+random_quote() {
+    if have fortune; then
+        fortune -s 2>/dev/null | head -n3 | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//'
+        return
+    fi
+    local quotes=(
+        "There are only two hard things in Computer Science: cache invalidation and naming things. — Phil Karlton"
+        "Talk is cheap. Show me the code. — Linus Torvalds"
+        "The best way to predict the future is to invent it. — Alan Kay"
+        "Premature optimization is the root of all evil. — Donald Knuth"
+        "Programs must be written for people to read, and only incidentally for machines to execute. — Hal Abelson"
+        "Simplicity is prerequisite for reliability. — Edsger Dijkstra"
+        "Any sufficiently advanced technology is indistinguishable from magic. — Arthur C. Clarke"
+        "Computers are good at following instructions, but not at reading your mind. — Donald Knuth"
+        "It's not a bug — it's an undocumented feature. — Anonymous"
+        "There is no cloud. It's just someone else's computer. — Anonymous"
+    )
+    printf '%s' "${quotes[$RANDOM % ${#quotes[@]}]}"
+}
+
+# =============================================================================
+# Rendering — building blocks
+# =============================================================================
+
+section() {
+    local title="$1"
+    local pre="  ${C_PURPLE}▎${NC}  ${BOLD}${C_FG}${title}${NC}  "
+    local pre_w
+    pre_w="$(vwidth "$pre")"
+    local rule_w=$(( WIDTH - pre_w ))
+    (( rule_w < 4 )) && rule_w=4
+    printf '\n%s%s%s%s\n' "$pre" "$C_DIM" "$(repeat '─' "$rule_w")" "$NC"
+}
+
+rule() {
+    printf '%s%s%s\n' "$C_DIM" "$(repeat '━' "$WIDTH")" "$NC"
+}
+
+row() {
+    local icon="$1" label="$2" value="$3"
+    printf '     %s%s%s  %s%-12s%s %s\n' \
+        "$C_PURPLE" "$icon" "$NC" \
+        "$C_GRAY" "$label" "$NC" \
+        "$value"
+}
+
+color_pct() {
+    local p="${1:-0}"
+    if   (( p < 50 )); then printf '%s' "$C_GREEN"
+    elif (( p < 80 )); then printf '%s' "$C_YELLOW"
+    else                    printf '%s' "$C_RED"
+    fi
+}
+
+draw_bar() {
+    local pct="${1:-0}" bar_w="${2:-24}" suffix="${3:-}"
+    [[ "$pct" =~ ^[0-9]+$ ]] || pct=0
+    (( pct > 100 )) && pct=100
+    local filled=$(( pct * bar_w / 100 ))
+    local empty=$(( bar_w - filled ))
+    local col
+    col="$(color_pct "$pct")"
+    printf '%s[%s%s%s%s%s%s%s] %s%3d%%%s  %s%s%s' \
+        "$C_DIM" "$NC" \
+        "$col" "$(repeat '█' "$filled")" "$NC" \
+        "$C_DIM" "$(repeat '░' "$empty")" "$NC" \
+        "$col" "$pct" "$NC" \
+        "$C_GRAY" "$suffix" "$NC"
+}
+
+# Render the hostname as a big block-letter banner with a horizontal gradient.
+banner() {
+    local text="$1"
+    local lines=()
+    if have figlet; then
+        mapfile -t lines < <(figlet -f standard -w "$WIDTH" -- "$text" 2>/dev/null \
+            || figlet -w "$WIDTH" -- "$text" 2>/dev/null \
+            || printf '%s\n' "$text")
+    else
+        lines=("$text")
+    fi
+    # Trim trailing empty lines.
+    while (( ${#lines[@]} > 0 )) && [[ -z "${lines[-1]// /}" ]]; do
+        unset 'lines[-1]'
+    done
+    local n=${#lines[@]} cols
+    (( n == 0 )) && { printf '  %s%s%s\n' "$BOLD" "$text" "$NC"; return; }
+    # Use the longest line to compute the gradient width.
+    cols=0
+    for l in "${lines[@]}"; do (( ${#l} > cols )) && cols=${#l}; done
+    local i col c
+    for l in "${lines[@]}"; do
+        printf '  '
+        for (( i=0; i<${#l}; i++ )); do
+            c="${l:i:1}"
+            if [[ "$c" == " " ]]; then printf ' '; continue; fi
+            local idx=$(( i * (${#GRADIENT[@]} - 1) / (cols > 0 ? cols : 1) ))
+            (( idx >= ${#GRADIENT[@]} )) && idx=$(( ${#GRADIENT[@]} - 1 ))
+            printf '\e[38;2;%sm%s' "${GRADIENT[$idx]}" "$c"
+        done
+        printf '%s\n' "$NC"
+    done
+}
+
+# =============================================================================
+# Section renderers
+# =============================================================================
+
+render_banner() {
+    local host dt
+    host="$(hostname -s 2>/dev/null || hostname)"
+    dt="$(date '+%a %d %b %Y · %H:%M:%S %Z')"
+    rule
+    printf '\n'
+    banner "$host"
+    printf '\n   %s%s  %s%s%s  %s%s%s  %s%s%s\n\n' \
+        "${C_GRAY}" "$(distro_glyph) ${DISTRO_PRETTY}${NC}" \
+        "$C_DIM" "·" "$NC" \
+        "$C_PURPLE" "${I_CLOCK}" "$NC" \
+        "$C_FG" "$dt" "$NC"
+    rule
+}
+
+render_system() {
+    section "System"
+    local os_line latest cur
+    cur="$DISTRO_VERSION_ID"
+    latest="$(latest_release || true)"
+    if [[ -n "$latest" && -n "$cur" && "$latest" != "$cur" ]]; then
+        os_line="${DISTRO_PRETTY} ${C_YELLOW}${I_WARN} update available → ${latest}${NC}"
+    else
+        os_line="${DISTRO_PRETTY} ${C_GREEN}${I_OK} up to date${NC}"
+    fi
+    row "$I_OS"     "OS"      "$os_line"
+    row "$I_KERNEL" "Kernel"  "$(uname -r)"
+    row "$I_UPTIME" "Uptime"  "$(uptime -p 2>/dev/null | sed 's/^up //')"
+    row "$I_LOAD"   "Load"    "$(awk '{printf "%s · %s · %s", $1, $2, $3}' /proc/loadavg)"
+    local users
+    users="$(who | wc -l)"
+    row "$I_USER"   "Users"   "${users} logged in"
+}
+
+render_resources() {
+    section "Resources"
+    local cpu mem disk temp
+    cpu="$(cpu_pct || echo 0)"
+    [[ -z "$cpu" ]] && cpu=0
+    read -r mp mu mt < <(mem_info)
+    read -r dp du dt < <(disk_info /)
+    temp="$(cpu_temp_c)"
+    row "$I_CPU"  "CPU"     "$(draw_bar "$cpu"  24 "")"
+    row "$I_RAM"  "Memory"  "$(draw_bar "${mp:-0}" 24 "${mu:-0} / ${mt:-0} GiB")"
+    row "$I_DISK" "Disk /"  "$(draw_bar "${dp:-0}" 24 "${du:-0} / ${dt:-0} GiB")"
+    if [[ -n "$temp" ]]; then
+        local tcol="$C_GREEN"
+        (( temp >= 70 )) && tcol="$C_YELLOW"
+        (( temp >= 85 )) && tcol="$C_RED"
+        row "$I_TEMP" "Temp" "${tcol}${temp}°C${NC}"
+    fi
+}
+
+render_network() {
+    section "Network"
+    local v4 v6 ext geo country city geo_label rdns_v4 rdns_ext
+    v4="$(ipv4_addr)"
+    v6="$(ipv6_addr)"
+    ext="$(ext_ip)"
+    rdns_v4="$(rdns "$v4")"
+    rdns_ext="$(rdns "$ext")"
+    [[ -z "$rdns_v4" ]] && rdns_v4="—"
+    [[ -z "$rdns_ext" ]] && rdns_ext="—"
+
+    [[ -n "$v4" ]] && row "$I_NET"   "IPv4"     "${v4}  ${C_DIM}→ ${rdns_v4}${NC}"
+    [[ -n "$v6" ]] && row "$I_NET"   "IPv6"     "$v6"
+    if [[ -n "$ext" ]]; then
+        geo="$(geoip "$ext")"
+        country="$(geo_country "$geo")"
+        city="$(geo_city "$geo")"
+        geo_label=""
+        [[ -n "$country" ]] && geo_label="${I_FLAG} ${country}"
+        [[ -n "$city" ]]    && geo_label="${geo_label} · ${city}"
+        row "$I_GLOBE" "External" "${ext}  ${C_DIM}→ ${rdns_ext}${NC}  ${C_PINK}${geo_label}${NC}"
+    fi
+}
+
+render_security() {
+    local fail2 ssh tor
+    fail2="$(fail2ban_summary)"
+    ssh="$(failed_ssh_24h || echo 0)"
+    tor="$(tor_status)"
+    # Only show if at least one source has data.
+    if [[ -z "$fail2" && -z "$tor" && "${ssh:-0}" -eq 0 ]]; then
+        return 0
+    fi
+    section "Security"
+    if [[ -n "$fail2" ]]; then
+        read -r jails banned <<<"$fail2"
+        row "$I_SHIELD" "Fail2Ban" "${C_GREEN}${I_OK} active${NC}  ${C_GRAY}— ${jails} jails, ${banned} banned${NC}"
+    fi
+    if [[ -n "${ssh:-}" ]]; then
+        local col="$C_GREEN"
+        (( ssh > 10 )) && col="$C_YELLOW"
+        (( ssh > 50 )) && col="$C_RED"
+        row "$I_LOCK" "SSH (24h)" "${col}${ssh}${NC} ${C_GRAY}failed attempts${NC}"
+    fi
+    if [[ -n "$tor" ]]; then
+        local state="${tor%% *}"
+        if [[ "$state" == "active" ]]; then
+            row "$I_TOR" "Tor" "${C_GREEN}${I_OK} active${NC}"
+        else
+            row "$I_TOR" "Tor" "${C_RED}${I_FAIL} inactive${NC}"
+        fi
+    fi
+}
+
+render_updates() {
+    local out
+    out="$(apt_updates)"
+    [[ -z "$out" ]] && return 0
+    read -r total sec <<<"$out"
+    section "Updates"
+    local col="$C_GREEN" ico="$I_OK"
+    (( total > 0 )) && { col="$C_YELLOW"; ico="$I_WARN"; }
+    (( sec > 0 ))   && { col="$C_RED";    ico="$I_FAIL"; }
+    row "$I_UPDATE" "Available" "${col}${ico} ${total}${NC} ${C_GRAY}packages${NC}"
+    row "$I_LOCK"   "Security"  "${col}${sec}${NC} ${C_GRAY}critical${NC}"
+}
+
+render_containers() {
+    local d
+    d="$(docker_status)"
+    [[ -z "$d" ]] && return 0
+    read -r running total <<<"$d"
+    section "Containers"
+    row "$I_DOCKER" "Docker" "${C_GREEN}${running}${NC} ${C_GRAY}running${NC} · ${total} total"
+}
+
+render_lastlogin() {
+    local line user term ip when
+    # First non-current, non-reboot, non-wtmp-footer entry. `last -F` prints
+    # the full timestamp as "Day Mon DD HH:MM:SS YYYY" in fields 4..8.
+    line="$(last -i -F 2>/dev/null \
+        | awk '$1 != "" && $1 != "reboot" && $1 != "wtmp" && $0 !~ /still logged in/ {print; exit}')"
+    [[ -z "$line" ]] && return 0
+    user="$(awk '{print $1}' <<<"$line")"
+    term="$(awk '{print $2}' <<<"$line")"
+    ip="$(awk '{print $3}' <<<"$line")"
+    when="$(awk '{print $4, $5, $6, $7, $8}' <<<"$line")"
+    section "Last Login"
+    row "$I_USER" "User"     "${BOLD}${user}${NC}  ${C_GRAY}via ${term}${NC}"
+    row "$I_NET"  "From"     "${ip:-—}"
+    row "$I_LAST" "When"     "$when"
+}
+
+render_processes() {
+    section "Top Processes"
+    printf '     %s%-8s %-22s %8s %8s%s\n' \
+        "$C_GRAY" "PID" "COMMAND" "CPU" "MEM" "$NC"
+    ps -eo pid,comm,%cpu,%mem --sort=-%cpu --no-headers 2>/dev/null \
+        | head -n 5 \
+        | awk -v c="$C_FG" -v g="$C_GRAY" -v p="$C_PURPLE" -v r="$NC" \
+            '{printf "     %s%-8s%s %s%-22s%s %s%8s%s %s%8s%s\n", p, $1, r, c, $2, r, c, $3, r, g, $4, r}'
+}
+
+render_footer() {
+    rule
+    local w q
+    w="$(weather_line)"
+    q="$(random_quote)"
+    [[ -n "$w" ]] && printf '   %s%s%s  %s%s%s\n' "$C_BLUE" "$I_WEATHER" "$NC" "$C_CYAN" "$w" "$NC"
+    [[ -n "$q" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PURPLE" "$I_BOLT" "$NC" "$C_DIM" "$q" "$NC"
+}
+
+# =============================================================================
+# Main
+# =============================================================================
+
+main() {
+    render_banner
+    render_system
+    render_resources
+    render_network
+    render_security
+    render_updates
+    render_containers
+    render_lastlogin
+    render_processes
+    printf '\n'
+    render_footer
+}
+
+main "$@"
