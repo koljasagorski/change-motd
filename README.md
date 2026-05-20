@@ -46,17 +46,61 @@
 
 ## Features
 
+### Optik
 -  **Truecolor-Banner** (24-bit Gradient) mit Hostname via `figlet`
--  **Distro-Detection** über `/etc/os-release` (Debian, Ubuntu, Raspbian, Kali, Fedora, Arch, Alpine, …)
--  **Unicode-Balken** (█ ░) statt `#` für CPU / Memory / Disk
--  **Nerd-Font-Glyphs** für jedes Feld
--  **Geo-IP-Lookup** der externen IP (mit Reverse-DNS)
--  **Fail2Ban**-Status, gesperrte IPs, fehlgeschlagene SSH-Logins (24 h)
--  **Tor** und  **Docker** werden automatisch erkannt — keine extra Skripte mehr
--  **Wetter** (wttr.in) und Random-Nerd-Quote im Footer
--  **Caching** für teure HTTP-Calls (Geo-IP, External-IP, Release-Check)
+-  **5 Themes**: `catppuccin`, `synthwave`, `dracula`, `nord`, `gruvbox` — oder `auto` (wöchentlicher Rotations-Cycle)
+-  **5 Login-Animationen** (opt-in): `matrix` (Matrix-Rain), `decrypt` (Entschlüsselungs-Effekt), `glitch` (Hacker-Movie-Style), `type` (Char-by-Char-Aufbau), `boot` (Fake-BIOS-Sequenz)
+-  **Unicode-Blockbalken** (█ ░) für CPU / RAM / Disk / Swap, optional Fill-Animation
+-  **Sparklines** (▁▂▃▄▅▆▇█) für Load-Average und Failed-SSH-Historie (24 h)
+-  **Pulse-Glow** (Blink-ANSI) für kritische Werte (Reboot-required, Temp > 85 °C)
+-  **Mood-Emoji** neben dem CPU-Balken (😴 😅 😰 🥵 🔥) — reagiert auf Last & Temperatur
+-  **Distro-Detection** via `/etc/os-release` mit Nerd-Font-Glyph (Debian, Ubuntu, Arch, Fedora, Alpine, NixOS, …)
+
+### System-Infos
+-  CPU-Modell, Cores/Threads, Architektur, Virtualisierung (KVM/Docker/LXC/WSL via `systemd-detect-virt`)
+-  CPU-Temperatur, **Mainboard-Temp**, **Lüfter-RPM** (`lm-sensors`)
+-  **GPU**-Info (`nvidia-smi` oder `lspci`)
+-  **Swap**, alle gemounteten Filesystems (nicht nur `/`)
+-  **SMART-Health** aller Disks (`smartmontools`)
+-  Load-Avg, Uptime, aktive SSH-Sessions
+
+### Netzwerk
+- 🌐 IPv4 / IPv6 / Externe IP mit Geo-IP-Lookup + Reverse-DNS
+-  Default-Gateway, DNS-Resolver
+-  Link-Speed der primären NIC (Mbit/s)
+-  Ping-Latenz (konfigurierbarer Host, default `1.1.1.1`)
+-  RX/TX-Traffic seit Boot
+-  Etablierte Sockets + listening Ports
+-  **VPN-Erkennung** (WireGuard, OpenVPN, ProtonVPN, …)
+
+### Sicherheit & Health
+-  **`Reboot-required`** (Pulse-Red, wenn ja) inkl. Anzahl betroffener Pakete
+-  **Failed systemd-Units** (`systemctl --failed`)
+-  **OOM-Kills** der letzten 24 h
+-  **Zombie**-Prozesse
+-  **AppArmor / SELinux**-Status
+-  **UFW**-Status
+-  **NTP**-Sync-Status
+-  **Fail2Ban**: Jails + gesperrte IPs
+-  **TLS-Cert-Ablauf** für konfigurierte Domains (Warnung < 30 d, kritisch < 7 d)
+-  Fehlgeschlagene SSH-Logins (24 h) + Sparkline-Verlauf
+
+### Auto-Detection (optional, ohne Konfiguration)
+-  **Tor** — Status
+-  **Docker** — laufende vs. Gesamt-Container
+- ✨ **Fortune** — Random-Nerd-Zitat im Footer
+- ⛅ **Wetter** (`wttr.in`, konfigurierbare Stadt)
+-  **"On this day" Tech-History** im Footer
+
+### Schedule
+- 󰁫 **Last Backup**: relative Zeit (`5 min ago`, `3 h ago`, `2 d ago`) anhand der mtime eines konfigurierten Pfads
+-  **Nächster systemd-Timer / Cron-Job**
+
+### Code & Infrastruktur
+-  **Caching** (`/var/cache/motd`) mit TTLs für alle HTTP-Calls
 -  **Dynamisches MOTD** via `/etc/update-motd.d/` — Werte sind beim Login immer frisch
--  **Auto-Update** aus GitHub (systemd-Timer, 4×/Tag)
+-  **Auto-Update** aus GitHub (systemd-Timer, 4×/Tag mit Jitter, SHA-256-Vergleich)
+-  Graceful Fallback bei fehlenden Tools — kein Crash
 
 ---
 
@@ -163,17 +207,37 @@ sudo systemctl disable --now motd-self-update.timer
 
 ##  Konfiguration
 
-Alle Einstellungen in **`/etc/default/motd`**:
+Alle Einstellungen in **`/etc/default/motd`**. Änderungen wirken beim nächsten Login.
 
-| Variable               | Default                       | Beschreibung                                     |
-| ---------------------- | ----------------------------- | ------------------------------------------------ |
-| `MOTD_WEATHER_CITY`    | _(leer = aus)_                | Stadt für `wttr.in` (z. B. `Berlin`)             |
-| `MOTD_CACHE_DIR`       | `/var/cache/motd`             | Cache-Verzeichnis                                |
-| `MOTD_HTTP_TIMEOUT`    | `3`                           | Timeout (s) für externe HTTP-Calls               |
-| `MOTD_REPO`            | `koljasagorski/change-motd`   | GitHub-Repo für Self-Update                      |
-| `MOTD_BRANCH`          | `main`                        | Branch für Self-Update                           |
+| Variable               | Default                       | Beschreibung                                                                  |
+| ---------------------- | ----------------------------- | ----------------------------------------------------------------------------- |
+| `MOTD_THEME`           | `auto`                        | Farbschema: `catppuccin`/`synthwave`/`dracula`/`nord`/`gruvbox`/`auto`        |
+| `MOTD_ANIMATE`         | `off`                         | Login-Animation: `off`/`matrix`/`decrypt`/`glitch`/`type`/`boot`              |
+| `MOTD_ANIMATE_BARS`    | `0`                           | Resource-Balken animiert füllen (0/1)                                         |
+| `MOTD_SPARKLINES`      | `1`                           | Sparklines für Load + Failed-SSH (0/1)                                        |
+| `MOTD_FUNFACT`         | `1`                           | "On this day" Tech-History-Zeile (0/1)                                        |
+| `MOTD_WEATHER_CITY`    | _(leer = aus)_                | Stadt für `wttr.in` (z. B. `Berlin`)                                          |
+| `MOTD_PING_HOST`       | `1.1.1.1`                     | Host für die Ping-Latenz-Zeile                                                |
+| `MOTD_BACKUP_PATH`     | _(leer = aus)_                | Pfad, dessen mtime als "Last Backup" angezeigt wird (z. B. `/var/backups/db`) |
+| `MOTD_CERT_DOMAINS`    | _(leer = aus)_                | Space-getrennte Domains für TLS-Cert-Ablauf-Check                             |
+| `MOTD_CACHE_DIR`       | `/var/cache/motd`             | Cache-Verzeichnis                                                             |
+| `MOTD_HTTP_TIMEOUT`    | `3`                           | Timeout (s) für externe HTTP-Calls                                            |
+| `MOTD_REPO`            | `koljasagorski/change-motd`   | GitHub-Repo für Self-Update                                                   |
+| `MOTD_BRANCH`          | `main`                        | Branch für Self-Update                                                        |
 
-Änderungen wirken beim nächsten Login (MOTD wird bei jedem Login dynamisch gerendert).
+### Beispiel: Maximaler Nerd-Modus
+
+```bash
+sudo tee -a /etc/default/motd >/dev/null <<'EOF'
+MOTD_THEME="synthwave"
+MOTD_ANIMATE="matrix"
+MOTD_ANIMATE_BARS="1"
+MOTD_WEATHER_CITY="Berlin"
+MOTD_PING_HOST="1.1.1.1"
+MOTD_CERT_DOMAINS="example.com api.example.com"
+MOTD_BACKUP_PATH="/var/backups/restic.log"
+EOF
+```
 
 ---
 
