@@ -56,12 +56,16 @@ readonly BOLD=$'\e[1m'
 readonly DIM=$'\e[2m'
 readonly BLINK=$'\e[5m'
 
+# Palette layout (RGB triplets, space-separated):
+#   RED GREEN YELLOW BLUE PURPLE CYAN PINK TEAL GRAY DIM FG
+# C_DIM is used only for decorative separators and empty bar cells, so it
+# stays visible but subtle (>= ~3:1 contrast on a dark terminal background).
 declare -A THEMES
-THEMES[catppuccin]="243;139;168 166;227;161 249;226;175 137;180;250 203;166;247 137;220;235 245;194;231 148;226;213 127;132;156 88;91;112 205;214;244"
-THEMES[synthwave]="255;83;191 159;255;130 255;215;0 119;217;255 196;127;255 0;240;255 255;128;192 0;255;200 130;104;200 50;30;80 230;230;255"
-THEMES[dracula]="255;85;85 80;250;123 241;250;140 139;233;253 189;147;249 139;233;253 255;121;198 80;250;123 98;114;164 68;71;90 248;248;242"
-THEMES[nord]="191;97;106 163;190;140 235;203;139 129;161;193 180;142;173 136;192;208 191;97;106 143;188;187 76;86;106 59;66;82 216;222;233"
-THEMES[gruvbox]="251;73;52 184;187;38 250;189;47 131;165;152 211;134;155 142;192;124 254;128;25 184;187;38 102;92;84 60;56;54 235;219;178"
+THEMES[catppuccin]="243;139;168 166;227;161 249;226;175 137;180;250 203;166;247 137;220;235 245;194;231 148;226;213 166;173;200 108;112;134 205;214;244"
+THEMES[synthwave]="255;83;191 159;255;130 255;215;0 119;217;255 196;127;255 0;240;255 255;128;192 0;255;200 175;155;225 115;85;160 230;230;255"
+THEMES[dracula]="255;85;85 80;250;123 241;250;140 139;233;253 189;147;249 139;233;253 255;121;198 80;250;123 148;164;200 98;101;120 248;248;242"
+THEMES[nord]="191;97;106 163;190;140 235;203;139 129;161;193 180;142;173 136;192;208 191;97;106 143;188;187 130;145;165 92;105;125 216;222;233"
+THEMES[gruvbox]="251;73;52 184;187;38 250;189;47 131;165;152 211;134;155 142;192;124 254;128;25 184;187;38 168;153;132 110;102;96 235;219;178"
 
 if [[ "$THEME" == "auto" ]]; then
     # Rotate weekly so the same server feels fresh.
@@ -1214,7 +1218,7 @@ render_network() {
     [[ -n "$v4" ]] && {
         local rdv4
         rdv4="$(rdns "$v4")"; [[ -z "$rdv4" ]] && rdv4="—"
-        row "$I_NET" "IPv4" "${v4}  ${C_DIM}→ ${rdv4}${NC}"
+        row "$I_NET" "IPv4" "${v4}  ${C_GRAY}→ ${rdv4}${NC}"
     }
     [[ -n "$v6" ]] && row "$I_NET" "IPv6" "$v6"
     if [[ -n "$ext" ]]; then
@@ -1226,7 +1230,7 @@ render_network() {
         local geo_label=""
         [[ -n "$country" ]] && geo_label="${I_FLAG} ${country}"
         [[ -n "$city" ]]    && geo_label="${geo_label} · ${city}"
-        row "$I_GLOBE" "External" "${ext}  ${C_DIM}→ ${rdex}${NC}  ${C_PINK}${geo_label}${NC}"
+        row "$I_GLOBE" "External" "${ext}  ${C_GRAY}→ ${rdex}${NC}  ${C_PINK}${geo_label}${NC}"
     fi
     [[ -n "$gw" ]]  && row "$I_GATE" "Gateway" "$gw"
     [[ -n "$dns" ]] && row "$I_DNS"  "DNS"     "$dns"
@@ -1290,7 +1294,7 @@ render_security() {
         (( ssh > 10 )) && col="$C_YELLOW"
         (( ssh > 50 )) && col="$C_RED"
         local spark=""
-        [[ "$SHOW_SPARKLINES" == "1" ]] && spark=" ${C_DIM}$(ssh_history_sparkline)${NC}"
+        [[ "$SHOW_SPARKLINES" == "1" ]] && spark=" ${C_GRAY}$(ssh_history_sparkline)${NC}"
         row "$I_LOCK" "SSH (24h)" "${col}${ssh}${NC} ${C_GRAY}failed${NC}${spark}"
     fi
     if (( ${#sessions[@]} > 0 )); then
@@ -1403,9 +1407,9 @@ render_footer() {
     w="$(weather_line)"
     q="$(random_quote)"
     f="$(funfact)"
-    [[ -n "$w" ]] && printf '   %s%s%s  %s%s%s\n' "$C_BLUE" "$I_WEATHER" "$NC" "$C_CYAN" "$w" "$NC"
-    [[ -n "$f" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PINK"  "$I_CLOCK"   "$NC" "$C_DIM"  "$f" "$NC"
-    [[ -n "$q" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PURPLE" "$I_BOLT"   "$NC" "$C_DIM"  "$q" "$NC"
+    [[ -n "$w" ]] && printf '   %s%s%s  %s%s%s\n' "$C_BLUE"   "$I_WEATHER" "$NC" "$C_CYAN" "$w" "$NC"
+    [[ -n "$f" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PINK"   "$I_CLOCK"   "$NC" "$C_FG"   "$f" "$NC"
+    [[ -n "$q" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PURPLE" "$I_BOLT"    "$NC" "$C_GRAY" "$q" "$NC"
 }
 
 # =============================================================================
