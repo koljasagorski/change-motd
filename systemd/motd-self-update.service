@@ -1,0 +1,22 @@
+[Unit]
+Description=Self-update nerdy MOTD scripts from GitHub
+Documentation=https://github.com/koljasagorski/change-motd
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/motd-self-update
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+# motd-self-update only writes into /usr/local/bin
+ReadWritePaths=/usr/local/bin
+# Don't let a single hang block the timer.
+TimeoutStartSec=120

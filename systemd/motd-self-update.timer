@@ -1,0 +1,16 @@
+[Unit]
+Description=Run nerdy-MOTD self-update four times a day
+Documentation=https://github.com/koljasagorski/change-motd
+
+[Timer]
+# 00:17, 06:17, 12:17, 18:17 — offset minutes to avoid the top-of-hour rush.
+OnCalendar=*-*-* 00,06,12,18:17:00
+# Run once shortly after boot to catch missed schedules.
+OnBootSec=3min
+# Spread load across servers so GitHub raw doesn't see a thundering herd.
+RandomizedDelaySec=15min
+Persistent=true
+Unit=motd-self-update.service
+
+[Install]
+WantedBy=timers.target

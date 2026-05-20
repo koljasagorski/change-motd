@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# motd-self-update — Keep motd-generate in sync with GitHub.
+#
+# Pulls the latest motd-generate (and this updater) from the configured
+# repository/branch and atomically replaces the installed files. Designed to be
+# called by the matching systemd timer multiple times a day.
+
+set -euo pipefail
+umask 022
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+[[ -r /etc/default/motd ]] && . /etc/default/motd
+REPO="${MOTD_REPO:-koljasagorski/change-motd}"
+BRANCH="${MOTD_BRANCH:-main}"
+RAW_BASE="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
+HTTP_TIMEOUT="${MOTD_HTTP_TIMEOUT:-15}"
+
+# Files to keep in sync. Relative path in the repo → absolute path on disk.
+declare -A FILES=(
+    [motd-generate]=/usr/local/bin/motd-generate
+    [motd-self-update]=/usr/local/bin/motd-self-update
+)
+
+log() { logger -t motd-self-update -- "$*"; printf '%s\n' "$*"; }
+
+# ---------------------------------------------------------------------------
+# Fetch one file from GitHub with retry/backoff; only writes on change.
+# ---------------------------------------------------------------------------
+
+update_file() {
+    local rel="$1" dest="$2"
+    local tmp
+    tmp="$(mktemp)"
+    trap 'rm -f "$tmp"' RETURN
+
+    local attempt sleep_s=2
+    for attempt in 1 2 3 4; do
+        if curl -fsSL --max-time "$HTTP_TIMEOUT" "${RAW_BASE}/${rel}" -o "$tmp"; then
+            break
+        fi
+        log "fetch failed (attempt ${attempt}/4): ${rel}"
+        if (( attempt == 4 )); then
+            log "giving up on ${rel}"
+            return 1
+        fi
+        sleep "$sleep_s"
+        sleep_s=$(( sleep_s * 2 ))
+    done
+
+    # Sanity-check: file must start with a shebang.
+    if ! head -n1 "$tmp" | grep -q '^#!'; then
+        log "refusing to install ${rel}: missing shebang"
+        return 1
+    fi
+
+    # Only replace on content change.
+    local new_sum old_sum=""
+    new_sum="$(sha256sum "$tmp" | awk '{print $1}')"
+    [[ -f "$dest" ]] && old_sum="$(sha256sum "$dest" | awk '{print $1}')"
+    if [[ "$new_sum" == "$old_sum" ]]; then
+        return 0
+    fi
+
+    chmod 0755 "$tmp"
+    # Move on top of $dest atomically (same filesystem assumed for /usr/local/bin).
+    mv -f "$tmp" "$dest"
+    log "updated ${dest} (sha256=${new_sum:0:12}…)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+main() {
+    local rc=0
+    for rel in "${!FILES[@]}"; do
+        update_file "$rel" "${FILES[$rel]}" || rc=$?
+    done
+    exit "$rc"
+}
+
+main "$@"
