@@ -12,7 +12,7 @@ export LC_ALL=C.UTF-8 LANG=C.UTF-8
 # Configuration
 # =============================================================================
 
-readonly MOTD_VERSION="2.0.0"
+readonly MOTD_VERSION="2.1.0"
 readonly CACHE_DIR="${MOTD_CACHE_DIR:-/var/cache/motd}"
 readonly HTTP_TIMEOUT="${MOTD_HTTP_TIMEOUT:-3}"
 
@@ -22,11 +22,24 @@ readonly TTL_GEOIP=86400
 readonly TTL_RELEASE=86400
 readonly TTL_WEATHER=1800
 readonly TTL_UPDATES=600
+readonly TTL_FUNFACT=86400
 
-# /etc/default/motd may override MOTD_WEATHER_CITY, MOTD_HTTP_TIMEOUT, etc.
+# /etc/default/motd may override any MOTD_* variable.
+# shellcheck disable=SC1091
 [[ -r /etc/default/motd ]] && . /etc/default/motd
 
 WEATHER_CITY="${MOTD_WEATHER_CITY:-}"
+PING_HOST="${MOTD_PING_HOST:-1.1.1.1}"
+BACKUP_PATH="${MOTD_BACKUP_PATH:-}"
+CERT_DOMAINS="${MOTD_CERT_DOMAINS:-}"        # space-separated list
+THEME="${MOTD_THEME:-auto}"                  # catppuccin|synthwave|dracula|nord|gruvbox|auto
+ANIMATE="${MOTD_ANIMATE:-off}"               # off|matrix|decrypt|glitch|type|boot|bars
+ANIMATE_BARS="${MOTD_ANIMATE_BARS:-0}"       # animate resource bars (independent of ANIMATE)
+SHOW_SPARKLINES="${MOTD_SPARKLINES:-1}"
+SHOW_FUNFACT="${MOTD_FUNFACT:-1}"
+
+# Animations require a real TTY.
+[[ -t 1 ]] || { ANIMATE="off"; ANIMATE_BARS=0; }
 
 WIDTH="$(tput cols 2>/dev/null || echo 80)"
 [[ -z "$WIDTH" || "$WIDTH" -lt 60 ]] && WIDTH=80
@@ -35,34 +48,46 @@ readonly WIDTH
 mkdir -p "$CACHE_DIR" 2>/dev/null || true
 
 # =============================================================================
-# Colors (24-bit truecolor — Catppuccin-inspired)
+# Theme system — Catppuccin / Synthwave / Dracula / Nord / Gruvbox
 # =============================================================================
 
 readonly NC=$'\e[0m'
 readonly BOLD=$'\e[1m'
 readonly DIM=$'\e[2m'
+readonly BLINK=$'\e[5m'
 
-readonly C_RED=$'\e[38;2;243;139;168m'
-readonly C_GREEN=$'\e[38;2;166;227;161m'
-readonly C_YELLOW=$'\e[38;2;249;226;175m'
-readonly C_BLUE=$'\e[38;2;137;180;250m'
-readonly C_PURPLE=$'\e[38;2;203;166;247m'
-readonly C_CYAN=$'\e[38;2;137;220;235m'
-readonly C_PINK=$'\e[38;2;245;194;231m'
-readonly C_TEAL=$'\e[38;2;148;226;213m'
-readonly C_GRAY=$'\e[38;2;127;132;156m'
-readonly C_DIM=$'\e[38;2;88;91;112m'
-readonly C_FG=$'\e[38;2;205;214;244m'
+declare -A THEMES
+THEMES[catppuccin]="243;139;168 166;227;161 249;226;175 137;180;250 203;166;247 137;220;235 245;194;231 148;226;213 127;132;156 88;91;112 205;214;244"
+THEMES[synthwave]="255;83;191 159;255;130 255;215;0 119;217;255 196;127;255 0;240;255 255;128;192 0;255;200 130;104;200 50;30;80 230;230;255"
+THEMES[dracula]="255;85;85 80;250;123 241;250;140 139;233;253 189;147;249 139;233;253 255;121;198 80;250;123 98;114;164 68;71;90 248;248;242"
+THEMES[nord]="191;97;106 163;190;140 235;203;139 129;161;193 180;142;173 136;192;208 191;97;106 143;188;187 76;86;106 59;66;82 216;222;233"
+THEMES[gruvbox]="251;73;52 184;187;38 250;189;47 131;165;152 211;134;155 142;192;124 254;128;25 184;187;38 102;92;84 60;56;54 235;219;178"
 
-# Gradient palette for the hostname banner (RGB triplets).
-readonly GRADIENT=(
-    "245;194;231"
-    "203;166;247"
-    "137;180;250"
-    "137;220;235"
-    "148;226;213"
-    "166;227;161"
-)
+if [[ "$THEME" == "auto" ]]; then
+    # Rotate weekly so the same server feels fresh.
+    themes=(catppuccin synthwave dracula nord gruvbox)
+    THEME="${themes[$(( $(date +%V) % ${#themes[@]} ))]}"
+fi
+[[ -z "${THEMES[$THEME]+x}" ]] && THEME="catppuccin"
+
+read -r _R _G _Y _B _P _C _PINK _TEAL _GR _DIM _FG <<<"${THEMES[$THEME]}"
+
+mkfg() { printf '\e[38;2;%sm' "$1"; }
+C_RED="$(mkfg "$_R")"
+C_GREEN="$(mkfg "$_G")"
+C_YELLOW="$(mkfg "$_Y")"
+C_BLUE="$(mkfg "$_B")"
+C_PURPLE="$(mkfg "$_P")"
+C_CYAN="$(mkfg "$_C")"
+C_PINK="$(mkfg "$_PINK")"
+C_TEAL="$(mkfg "$_TEAL")"
+C_GRAY="$(mkfg "$_GR")"
+C_DIM="$(mkfg "$_DIM")"
+C_FG="$(mkfg "$_FG")"
+readonly C_RED C_GREEN C_YELLOW C_BLUE C_PURPLE C_CYAN C_PINK C_TEAL C_GRAY C_DIM C_FG
+
+# Gradient palette for the hostname banner: pink → purple → blue → cyan → teal → green.
+readonly GRADIENT=("$_PINK" "$_P" "$_B" "$_C" "$_TEAL" "$_G")
 
 # =============================================================================
 # Icons (Nerd Font recommended; falls back to plain text on non-NF terminals)
@@ -94,12 +119,30 @@ readonly I_BOLT=""
 readonly I_OK=""
 readonly I_WARN=""
 readonly I_FAIL=""
+readonly I_REBOOT=""
+readonly I_SWAP=""
+readonly I_GPU=""
+readonly I_FAN="󰈐"
+readonly I_BOARD=""
+readonly I_VIRT=""
+readonly I_GATE=""
+readonly I_DNS=""
+readonly I_VPN="󰒃"
+readonly I_PING=""
+readonly I_LINK=""
+readonly I_DOWN="↓"
+readonly I_UP="↑"
+readonly I_BACKUP=""
+readonly I_CRON=""
+readonly I_CERT=""
+readonly I_FIRE=""
+readonly I_GHOST=""
+readonly I_KEY=""
 
 # =============================================================================
 # Generic helpers
 # =============================================================================
 
-# Strip ANSI escape sequences (for visible-width measurements).
 strip_ansi() {
     # shellcheck disable=SC2001
     sed 's/\x1b\[[0-9;]*[a-zA-Z]//g' <<<"$1"
@@ -118,8 +161,9 @@ repeat() {
     printf '%s' "$out"
 }
 
+have() { command -v "$1" >/dev/null 2>&1; }
+
 # Cache the output of a command on disk. Returns stale cache on failure.
-# Usage: cached <key> <ttl-seconds> -- <cmd> [args...]
 cached() {
     local key="$1" ttl="$2"
     shift 2
@@ -143,13 +187,48 @@ cached() {
     fi
 }
 
-have() { command -v "$1" >/dev/null 2>&1; }
+# Human-readable bytes.
+fmt_bytes() {
+    local b="${1:-0}"
+    awk -v b="$b" 'BEGIN {
+        split("B KiB MiB GiB TiB PiB", u);
+        i=1;
+        while (b >= 1024 && i < 6) { b/=1024; i++ }
+        printf (i==1) ? "%d %s" : "%.1f %s", b, u[i]
+    }'
+}
+
+# Unicode sparkline: takes integers as args, prints a single-row sparkline.
+sparkline() {
+    local chars=(▁ ▂ ▃ ▄ ▅ ▆ ▇ █)
+    local max=0 n cmp
+    for n in "$@"; do
+        cmp="${n%.*}"
+        [[ "$cmp" =~ ^-?[0-9]+$ ]] || cmp=0
+        (( cmp > max )) && max=$cmp
+    done
+    (( max == 0 )) && max=1
+    local out=""
+    for n in "$@"; do
+        cmp="${n%.*}"
+        [[ "$cmp" =~ ^-?[0-9]+$ ]] || cmp=0
+        (( cmp < 0 )) && cmp=0
+        local idx=$(( cmp * 7 / max ))
+        (( idx > 7 )) && idx=7
+        out+="${chars[$idx]}"
+    done
+    printf '%s' "$out"
+}
+
+# Pulse-glow for critical values (\e[5m blink — supported by xterm, gnome, kitty, alacritty).
+pulse() {
+    printf '%s%s%s' "$BLINK" "$1" "$NC"
+}
 
 # =============================================================================
-# Data collection — distro
+# Distro detection
 # =============================================================================
 
-# Read /etc/os-release into associative-style globals.
 DISTRO_ID="linux"
 DISTRO_PRETTY="Linux"
 DISTRO_VERSION_ID=""
@@ -164,25 +243,24 @@ if [[ -r /etc/os-release ]]; then
 fi
 readonly DISTRO_ID DISTRO_PRETTY DISTRO_VERSION_ID DISTRO_CODENAME
 
-# Glyph for distro logo line (uses Nerd Font glyphs when available).
 distro_glyph() {
     case "$DISTRO_ID" in
-        ubuntu)         printf '' ;;
-        debian)         printf '' ;;
-        raspbian)       printf '' ;;
-        fedora)         printf '' ;;
-        arch|archlinux) printf '' ;;
-        alpine)         printf '' ;;
-        centos)         printf '' ;;
-        rocky|almalinux)printf '' ;;
-        kali)           printf '' ;;
-        manjaro)        printf '' ;;
-        opensuse*|suse) printf '' ;;
-        *)              printf '' ;;
+        ubuntu)            printf '' ;;
+        debian)            printf '' ;;
+        raspbian)          printf '' ;;
+        fedora)            printf '' ;;
+        arch|archlinux)    printf '' ;;
+        alpine)            printf '' ;;
+        centos)            printf '' ;;
+        rocky|almalinux)   printf '' ;;
+        kali)              printf '' ;;
+        manjaro)           printf '' ;;
+        opensuse*|suse)    printf '' ;;
+        nixos)             printf '' ;;
+        *)                 printf '' ;;
     esac
 }
 
-# Get latest distro release (cached). Returns empty on failure.
 latest_release() {
     case "$DISTRO_ID" in
         ubuntu)
@@ -202,65 +280,45 @@ latest_release() {
 }
 
 # =============================================================================
-# Data collection — system & network
+# Data collection — system & hardware
 # =============================================================================
 
-ext_ip()   { cached "extip" "$TTL_EXTIP" -- curl -fsSL --max-time "$HTTP_TIMEOUT" https://ifconfig.me; }
-
-geoip() {
-    local ip="$1"
-    [[ -z "$ip" ]] && return 0
-    cached "geo_$ip" "$TTL_GEOIP" -- \
-        curl -fsSL --max-time "$HTTP_TIMEOUT" "https://ipinfo.io/${ip}/json"
+cpu_model() {
+    awk -F: '/^model name/ {sub(/^[ \t]+/,"",$2); print $2; exit}' /proc/cpuinfo
 }
+cpu_cores()   { nproc 2>/dev/null; }
+cpu_threads() { grep -c '^processor' /proc/cpuinfo 2>/dev/null; }
+arch_name()   { uname -m; }
 
-geo_country() {
-    local json="$1"
-    [[ -z "$json" ]] && return 0
-    if have jq; then
-        jq -r '.country // empty' <<<"$json" 2>/dev/null
-    else
-        grep -Po '"country"\s*:\s*"\K[^"]+' <<<"$json" | head -n1
-    fi
-}
-
-geo_city() {
-    local json="$1"
-    [[ -z "$json" ]] && return 0
-    if have jq; then
-        jq -r '.city // empty' <<<"$json" 2>/dev/null
-    else
-        grep -Po '"city"\s*:\s*"\K[^"]+' <<<"$json" | head -n1
-    fi
-}
-
-# Reverse DNS lookup, prefers `getent` (no extra DNS round-trip).
-rdns() {
-    local ip="$1"
-    [[ -z "$ip" ]] && return 0
-    if have getent; then
-        getent hosts "$ip" 2>/dev/null | awk '{print $2}' | head -n1
-    elif have host; then
-        host "$ip" 2>/dev/null | awk '/domain name pointer/ {print $5; exit}' | sed 's/\.$//'
-    fi
+virt_type() {
+    have systemd-detect-virt || return 0
+    local v
+    v="$(systemd-detect-virt 2>/dev/null)"
+    [[ "$v" == "none" || -z "$v" ]] && return 0
+    printf '%s' "$v"
 }
 
 cpu_pct() {
-    # Single-shot top read is cheap and accurate enough for a MOTD.
     top -bn1 \
         | awk -F'[ ,]+' '/Cpu\(s\)/ {for(i=1;i<=NF;i++) if($i~/id/){print int(100 - $(i-1) + 0.5); exit}}'
 }
 
 mem_info() {
-    # Returns: "<pct> <used_gib> <total_gib>"
     free -b | awk '/^Mem:/ {
         used=$3; total=$2;
         printf "%d %.1f %.1f", (used*100/total)+0.5, used/1073741824, total/1073741824
     }'
 }
 
+swap_info() {
+    free -b | awk '/^Swap:/ {
+        if ($2 == 0) { printf "off 0 0"; next }
+        used=$3; total=$2;
+        printf "%d %.1f %.1f", (used*100/total)+0.5, used/1073741824, total/1073741824
+    }'
+}
+
 disk_info() {
-    # Disk usage for the given path (default /).
     local path="${1:-/}"
     df -B1 --output=pcent,used,size "$path" 2>/dev/null | awk 'NR==2 {
         gsub("%","",$1);
@@ -268,8 +326,43 @@ disk_info() {
     }'
 }
 
+# All real filesystems with their mount/use%/size.
+all_disks() {
+    df -h --output=target,pcent,used,size \
+        -x tmpfs -x devtmpfs -x squashfs -x overlay -x proc -x sysfs 2>/dev/null \
+        | awk 'NR>1 && $1 != ""'
+}
+
+smart_health() {
+    have smartctl || return 0
+    local d health out=""
+    for d in /dev/sd? /dev/nvme?n? /dev/hd?; do
+        [[ -b "$d" ]] || continue
+        health="$(sudo -n smartctl -H "$d" 2>/dev/null \
+            | awk -F: '/overall-health|SMART Health Status/ {gsub(/^ +/,"",$2); print $2; exit}')"
+        if [[ -z "$health" ]]; then
+            # Try without sudo (smartctl needs root on most kernels; skip silently).
+            health="$(smartctl -H "$d" 2>/dev/null \
+                | awk -F: '/overall-health|SMART Health Status/ {gsub(/^ +/,"",$2); print $2; exit}')"
+        fi
+        [[ -n "$health" ]] && out+="${d##*/}:${health} "
+    done
+    printf '%s' "${out% }"
+}
+
+gpu_info() {
+    if have nvidia-smi; then
+        nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu \
+                   --format=csv,noheader,nounits 2>/dev/null | head -n1 \
+            | awk -F, '{gsub(/^ +| +$/,"",$1); gsub(/^ +/,"",$2); gsub(/^ +/,"",$3);
+                       printf "%s · %s°C · %s%%", $1, $2, $3}'
+    elif have lspci; then
+        lspci 2>/dev/null \
+            | awk -F: '/VGA|3D controller/ {sub(/^ +/,"",$3); print $3; exit}'
+    fi
+}
+
 cpu_temp_c() {
-    # Best-effort temperature in °C (integer). Empty if unknown.
     local val=""
     if have sensors; then
         val="$(sensors 2>/dev/null \
@@ -288,18 +381,240 @@ cpu_temp_c() {
     printf '%s' "$val"
 }
 
+fan_rpm() {
+    have sensors || return 0
+    sensors 2>/dev/null | awk '/^fan/ {gsub("RPM","",$2); print $2; exit}'
+}
+
+mb_temp_c() {
+    have sensors || return 0
+    sensors 2>/dev/null \
+        | awk '/^(Mainboard|Systemin|SYSTIN|temp1|board):/ {gsub(/\+|°C/,"",$NF); print int($NF+0.5); exit}'
+}
+
+# =============================================================================
+# Data collection — network
+# =============================================================================
+
 ipv4_addr() { hostname -I 2>/dev/null | awk '{print $1}'; }
 ipv6_addr() { ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2; exit}' | cut -d/ -f1; }
+default_gw() { ip route 2>/dev/null | awk '/^default/ {print $3; exit}'; }
+dns_resolver() {
+    if have resolvectl; then
+        resolvectl status 2>/dev/null | awk '/Current DNS Server/ {print $NF; exit}'
+    fi
+    [[ -r /etc/resolv.conf ]] && awk '/^nameserver/ {print $2; exit}' /etc/resolv.conf
+}
+
+net_traffic() {
+    # Returns: <rx_bytes> <tx_bytes> across all non-lo interfaces.
+    awk 'NR>2 {iface=$1; gsub(":","",iface); if(iface!="lo"){rx+=$2; tx+=$10}} END {printf "%d %d", rx, tx}' \
+        /proc/net/dev
+}
+
+primary_iface() {
+    ip -br link 2>/dev/null | awk '$2 == "UP" && $1 != "lo" {print $1; exit}'
+}
+
+link_speed_mbps() {
+    local iface
+    iface="$(primary_iface)"
+    [[ -z "$iface" ]] && return 0
+    [[ -r "/sys/class/net/$iface/speed" ]] || return 0
+    local s
+    s="$(cat "/sys/class/net/$iface/speed" 2>/dev/null)"
+    [[ "$s" =~ ^[0-9]+$ ]] && printf '%s %s' "$iface" "$s"
+}
+
+conn_count() {
+    have ss || return 0
+    ss -tu state established 2>/dev/null | tail -n +2 | wc -l
+}
+
+listen_ports_count() {
+    have ss || return 0
+    ss -tlnH 2>/dev/null | wc -l
+}
+
+vpn_status() {
+    local tunnels=""
+    if have wg; then
+        local n
+        n="$(wg show interfaces 2>/dev/null | wc -w)"
+        (( n > 0 )) && tunnels+="WireGuard:${n} "
+    fi
+    local tun_count
+    tun_count="$(ip -br link 2>/dev/null | awk '/^(tun|tap|nordlynx|proton|mullvad)/ {n++} END {print n+0}')"
+    (( tun_count > 0 )) && tunnels+="TUN:${tun_count} "
+    printf '%s' "${tunnels% }"
+}
+
+ping_latency() {
+    have ping || return 0
+    ping -c 1 -W 1 "$PING_HOST" 2>/dev/null \
+        | awk -F'[=/ ]+' '/time=/ {for(i=1;i<=NF;i++) if($i=="time"){printf "%.1f", $(i+1); exit}}'
+}
+
+ext_ip() {
+    cached "extip" "$TTL_EXTIP" -- curl -fsSL --max-time "$HTTP_TIMEOUT" https://ifconfig.me
+}
+
+geoip() {
+    local ip="$1"
+    [[ -z "$ip" ]] && return 0
+    cached "geo_$ip" "$TTL_GEOIP" -- \
+        curl -fsSL --max-time "$HTTP_TIMEOUT" "https://ipinfo.io/${ip}/json"
+}
+
+geo_field() {
+    local json="$1" key="$2"
+    [[ -z "$json" ]] && return 0
+    if have jq; then
+        jq -r --arg k "$key" '.[$k] // empty' <<<"$json" 2>/dev/null
+    else
+        grep -Po "\"$key\"\\s*:\\s*\"\\K[^\"]+" <<<"$json" | head -n1
+    fi
+}
+
+rdns() {
+    local ip="$1"
+    [[ -z "$ip" ]] && return 0
+    if have getent; then
+        getent hosts "$ip" 2>/dev/null | awk '{print $2}' | head -n1
+    elif have host; then
+        host "$ip" 2>/dev/null | awk '/domain name pointer/ {print $5; exit}' | sed 's/\.$//'
+    fi
+}
+
+# =============================================================================
+# Data collection — security & health
+# =============================================================================
+
+reboot_required() {
+    [[ -f /var/run/reboot-required ]] || return 0
+    local n=0
+    [[ -f /var/run/reboot-required.pkgs ]] && n="$(wc -l < /var/run/reboot-required.pkgs 2>/dev/null || echo 0)"
+    printf '%s' "$n"
+}
+
+failed_units() {
+    have systemctl || return 0
+    systemctl --failed --no-legend --plain --no-pager 2>/dev/null | awk '{print $1}'
+}
+
+failed_units_count() {
+    have systemctl || { printf 0; return; }
+    local n
+    n="$(systemctl --failed --no-legend --plain --no-pager 2>/dev/null | wc -l)"
+    printf '%s' "${n:-0}"
+}
 
 failed_ssh_24h() {
     if have journalctl; then
-        journalctl --since "24 hours ago" --no-pager -u ssh -u sshd -u openssh-server 2>/dev/null \
-            | grep -Ec 'Failed (password|publickey)|Invalid user' || true
+        journalctl --since "24 hours ago" --no-pager 2>/dev/null \
+            | grep -Ec 'Failed (password|publickey)|Invalid user|authentication failure' \
+            || true
     elif [[ -r /var/log/auth.log ]]; then
         grep -Ec "Failed (password|publickey)|Invalid user" /var/log/auth.log 2>/dev/null || true
     else
         printf '0'
     fi
+}
+
+# Sparkline of failed SSH attempts over 12 × 2h buckets in the last 24h.
+ssh_history_sparkline() {
+    have journalctl || return 0
+    local i bucket=""
+    local since_ts now_ts
+    now_ts="$(date +%s)"
+    local out=()
+    for (( i=11; i>=0; i-- )); do
+        local from=$(( now_ts - (i+1) * 7200 ))
+        local to=$(( now_ts - i * 7200 ))
+        local from_str to_str
+        from_str="$(date -d "@$from" '+%Y-%m-%d %H:%M:%S')"
+        to_str="$(date -d "@$to" '+%Y-%m-%d %H:%M:%S')"
+        local c
+        c="$(journalctl --since "$from_str" --until "$to_str" --no-pager 2>/dev/null \
+            | grep -Ec 'Failed (password|publickey)|Invalid user|authentication failure' || true)"
+        out+=("${c:-0}")
+    done
+    sparkline "${out[@]}"
+}
+
+# Sparkline of 1m loadavg over the last 12 samples from sar (if available).
+load_sparkline() {
+    if have sar; then
+        # sar -q gives loadavg history
+        local samples
+        samples="$(LC_ALL=C sar -q 2>/dev/null \
+            | awk '/^[0-9]/ {printf "%.0f ", $4*100}' \
+            | tail -c 100)"
+        if [[ -n "$samples" ]]; then
+            # shellcheck disable=SC2086
+            sparkline $samples
+            return
+        fi
+    fi
+    # Fallback: three samples from /proc/loadavg.
+    awk '{printf "%d %d %d\n", $1*100, $2*100, $3*100}' /proc/loadavg \
+        | { read -r a b c; sparkline "$a" "$b" "$c"; }
+}
+
+active_ssh_sessions() {
+    who 2>/dev/null | awk '$NF ~ /^\(/ {print $1"@"substr($NF,2,length($NF)-2)}' | sort -u
+}
+
+active_ssh_count() {
+    who 2>/dev/null | awk '$NF ~ /^\(/' | wc -l
+}
+
+mac_status() {
+    if have aa-status; then
+        if aa-status --enabled 2>/dev/null; then
+            local n
+            n="$(aa-status --profiled 2>/dev/null || echo 0)"
+            printf 'AppArmor:on(%s)' "$n"
+        fi
+    elif have getenforce; then
+        local s
+        s="$(getenforce 2>/dev/null)"
+        [[ -n "$s" ]] && printf 'SELinux:%s' "$s"
+    fi
+}
+
+ufw_status() {
+    have ufw || return 0
+    sudo -n ufw status 2>/dev/null | head -n1 | awk -F: '{gsub(/^ +/,"",$2); print $2}' \
+        || ufw status 2>/dev/null | head -n1 | awk -F: '{gsub(/^ +/,"",$2); print $2}'
+}
+
+oom_kills_24h() {
+    have journalctl || return 0
+    journalctl --since "24 hours ago" --no-pager 2>/dev/null \
+        | grep -Ec 'oom-kill|Killed process|Out of memory' || true
+}
+
+zombie_count() {
+    ps -eo state --no-headers 2>/dev/null | awk '/^Z/' | wc -l
+}
+
+ntp_status() {
+    have timedatectl || return 0
+    local synced
+    synced="$(timedatectl show -p NTPSynchronized --value 2>/dev/null)"
+    [[ -z "$synced" ]] && return 0
+    if [[ "$synced" == "yes" ]]; then printf 'synced'; else printf 'unsynced'; fi
+}
+
+apt_updates() {
+    have apt >/dev/null || return 0
+    cached "apt_updates" "$TTL_UPDATES" -- bash -c '
+        out="$(apt list --upgradable 2>/dev/null | tail -n +2)"
+        all=$(printf "%s\n" "$out" | grep -c .)
+        sec=$(printf "%s\n" "$out" | grep -ci security)
+        printf "%d %d" "$all" "$sec"
+    '
 }
 
 fail2ban_summary() {
@@ -320,28 +635,10 @@ fail2ban_summary() {
     printf '%d %d' "$count" "$banned"
 }
 
-apt_updates() {
-    have apt >/dev/null || return 0
-    cached "apt_updates" "$TTL_UPDATES" -- bash -c '
-        out="$(apt list --upgradable 2>/dev/null | tail -n +2)"
-        all=$(printf "%s\n" "$out" | grep -c .)
-        sec=$(printf "%s\n" "$out" | grep -ci security)
-        printf "%d %d" "$all" "$sec"
-    '
-}
-
 tor_status() {
     have systemctl || return 0
     systemctl list-unit-files 2>/dev/null | grep -q '^tor\.service' || return 0
-    if [[ "$(systemctl is-active tor 2>/dev/null)" == "active" ]]; then
-        local circ=""
-        if have nyx; then
-            circ="$(nyx --interface 2>/dev/null | head -c 0)"
-        fi
-        printf 'active %s' "${circ}"
-    else
-        printf 'inactive'
-    fi
+    [[ "$(systemctl is-active tor 2>/dev/null)" == "active" ]] && printf 'active' || printf 'inactive'
 }
 
 docker_status() {
@@ -352,6 +649,51 @@ docker_status() {
     total="$(docker ps -aq 2>/dev/null | wc -l)"
     printf '%s %s' "$running" "$total"
 }
+
+# TLS cert expiry in days for a domain. Empty on error.
+tls_expiry_days() {
+    local domain="$1"
+    [[ -z "$domain" ]] && return 0
+    have openssl || return 0
+    local end_date end_ts now_ts
+    end_date="$(cached "tls_${domain}" 21600 -- bash -c '
+        : | timeout 4 openssl s_client -servername "'"$domain"'" -connect "'"$domain"':443" 2>/dev/null \
+            | openssl x509 -noout -enddate 2>/dev/null \
+            | cut -d= -f2-
+    ')"
+    [[ -z "$end_date" ]] && return 0
+    end_ts="$(date -d "$end_date" +%s 2>/dev/null)"
+    [[ -z "$end_ts" ]] && return 0
+    now_ts="$(date +%s)"
+    printf '%d' $(( (end_ts - now_ts) / 86400 ))
+}
+
+# Last backup: mtime of $BACKUP_PATH.
+last_backup_human() {
+    [[ -z "$BACKUP_PATH" || ! -e "$BACKUP_PATH" ]] && return 0
+    local ts now diff
+    ts="$(stat -c %Y "$BACKUP_PATH" 2>/dev/null)"
+    [[ -z "$ts" ]] && return 0
+    now="$(date +%s)"
+    diff=$(( now - ts ))
+    if   (( diff < 3600 ));    then printf '%d min ago' $(( diff / 60 ))
+    elif (( diff < 86400 ));   then printf '%d h ago'  $(( diff / 3600 ))
+    elif (( diff < 2592000 )); then printf '%d d ago'  $(( diff / 86400 ))
+    else                            printf '%d mo ago' $(( diff / 2592000 ))
+    fi
+}
+
+# Next systemd timer or cron.
+next_scheduled() {
+    have systemctl || return 0
+    systemctl list-timers --no-legend --no-pager 2>/dev/null \
+        | awk 'NR==1 {for(i=1;i<=NF;i++) if($i~/\.timer$/){t=$i; break}
+                      printf "%s — %s %s %s", t, $1, $2, $3; exit}'
+}
+
+# =============================================================================
+# External: weather + quote + funfact
+# =============================================================================
 
 weather_line() {
     [[ -z "$WEATHER_CITY" ]] && return 0
@@ -375,8 +717,265 @@ random_quote() {
         "Computers are good at following instructions, but not at reading your mind. — Donald Knuth"
         "It's not a bug — it's an undocumented feature. — Anonymous"
         "There is no cloud. It's just someone else's computer. — Anonymous"
+        "Walking on water and developing software from a specification are easy if both are frozen. — Edward Berard"
+        "Make it work, make it right, make it fast. — Kent Beck"
+        "Weeks of coding can save you hours of planning. — Anonymous"
+        "In theory, there is no difference between theory and practice. In practice, there is. — Yogi Berra"
     )
     printf '%s' "${quotes[$RANDOM % ${#quotes[@]}]}"
+}
+
+# "On this day" tech-history fun fact (very rough — uses a static curated list).
+funfact() {
+    [[ "$SHOW_FUNFACT" == "1" ]] || return 0
+    local md
+    md="$(date '+%m-%d')"
+    declare -A facts=(
+        ["01-01"]="1983 — TCP/IP becomes the standard protocol of ARPANET"
+        ["01-12"]="1992 — Linus Torvalds releases Linux 0.12, the first under GPL"
+        ["02-04"]="2004 — Facebook is founded by Mark Zuckerberg"
+        ["02-08"]="1996 — John Perry Barlow publishes 'A Declaration of the Independence of Cyberspace'"
+        ["02-29"]="2000 — A Y2K-like bug strikes systems that didn't expect a leap year"
+        ["03-12"]="1989 — Tim Berners-Lee proposes the World Wide Web at CERN"
+        ["04-01"]="1976 — Apple Computer Company is founded by Steve Jobs and Steve Wozniak"
+        ["04-04"]="1975 — Microsoft is founded by Bill Gates and Paul Allen"
+        ["04-12"]="1961 — Yuri Gagarin becomes the first human in space"
+        ["05-20"]="1983 — The first chronological MAC address is registered"
+        ["06-23"]="1912 — Alan Turing is born"
+        ["07-20"]="1969 — Apollo 11 lands on the Moon"
+        ["08-06"]="1991 — The first website is published at info.cern.ch"
+        ["08-25"]="1991 — Linus posts 'I'm doing a (free) operating system (just a hobby)'"
+        ["09-09"]="1947 — The first computer 'bug' is logged (an actual moth)"
+        ["10-05"]="1991 — Linux 0.02 is released"
+        ["10-24"]="1995 — The Federal Networking Council defines 'Internet'"
+        ["11-09"]="2004 — Firefox 1.0 is released"
+        ["12-09"]="1968 — Doug Engelbart presents 'The Mother of All Demos'"
+        ["12-10"]="1815 — Ada Lovelace, the first programmer, is born"
+    )
+    local fact="${facts[$md]:-}"
+    if [[ -z "$fact" ]]; then
+        # Fall back to a random fact each day.
+        local all=("${facts[@]}")
+        # Stable per-day index.
+        local seed
+        seed=$(( $(date +%j) % ${#all[@]} ))
+        fact="${all[$seed]}"
+    fi
+    printf '%s' "$fact"
+}
+
+# =============================================================================
+# Animations (opt-in via MOTD_ANIMATE)
+# =============================================================================
+
+# Get figlet output as an array. Returns 1 if figlet missing.
+_figlet_lines() {
+    have figlet || return 1
+    local text="$1"
+    local raw
+    raw="$(figlet -f standard -w "$WIDTH" -- "$text" 2>/dev/null \
+        || figlet -w "$WIDTH" -- "$text" 2>/dev/null)"
+    [[ -z "$raw" ]] && return 1
+    # shellcheck disable=SC2034
+    mapfile -t _fl <<<"$raw"
+    while (( ${#_fl[@]} > 0 )) && [[ -z "${_fl[-1]// /}" ]]; do
+        unset '_fl[-1]'
+    done
+    return 0
+}
+
+_max_line_width() {
+    local -n arr=$1
+    local m=0 l
+    for l in "${arr[@]}"; do (( ${#l} > m )) && m=${#l}; done
+    printf '%s' "$m"
+}
+
+# Plain (non-animated) banner — also used as fallback.
+banner_static() {
+    local text="$1"
+    local _fl
+    if ! _figlet_lines "$text"; then
+        printf '  %s%s%s\n' "$BOLD" "$text" "$NC"
+        return
+    fi
+    local cols i c idx
+    cols="$(_max_line_width _fl)"
+    for l in "${_fl[@]}"; do
+        printf '  '
+        for ((i=0; i<${#l}; i++)); do
+            c="${l:i:1}"
+            [[ "$c" == " " ]] && { printf ' '; continue; }
+            idx=$(( i * (${#GRADIENT[@]} - 1) / (cols > 0 ? cols : 1) ))
+            (( idx >= ${#GRADIENT[@]} )) && idx=$(( ${#GRADIENT[@]} - 1 ))
+            printf '\e[38;2;%sm%s' "${GRADIENT[$idx]}" "$c"
+        done
+        printf '%s\n' "$NC"
+    done
+}
+
+# Type-out: char-by-char with gradient.
+anim_typeout() {
+    local text="$1"
+    local _fl
+    _figlet_lines "$text" || { printf '  %s\n' "$text"; return; }
+    local cols i c idx
+    cols="$(_max_line_width _fl)"
+    for l in "${_fl[@]}"; do
+        printf '  '
+        for ((i=0; i<${#l}; i++)); do
+            c="${l:i:1}"
+            if [[ "$c" == " " ]]; then printf ' '; continue; fi
+            idx=$(( i * (${#GRADIENT[@]} - 1) / (cols > 0 ? cols : 1) ))
+            (( idx >= ${#GRADIENT[@]} )) && idx=$(( ${#GRADIENT[@]} - 1 ))
+            printf '\e[38;2;%sm%s' "${GRADIENT[$idx]}" "$c"
+            sleep 0.004
+        done
+        printf '%s\n' "$NC"
+    done
+}
+
+# Decrypt: random glyphs settle into the real characters.
+anim_decrypt() {
+    local text="$1"
+    local _fl
+    _figlet_lines "$text" || { printf '  %s\n' "$text"; return; }
+    local cols n=${#_fl[@]} cs='!@#$%^&*?+/=ABCDEF0123456789'
+    cols="$(_max_line_width _fl)"
+    local frames=8 frame i l c idx rc
+
+    # Reserve N lines.
+    for ((i=0; i<n; i++)); do printf '\n'; done
+
+    for ((frame=1; frame<=frames; frame++)); do
+        printf '\e[%dA' "$n"
+        for l in "${_fl[@]}"; do
+            printf '\r\e[K  '
+            for ((i=0; i<${#l}; i++)); do
+                c="${l:i:1}"
+                if [[ "$c" == " " ]]; then printf ' '; continue; fi
+                idx=$(( i * (${#GRADIENT[@]} - 1) / (cols > 0 ? cols : 1) ))
+                (( idx >= ${#GRADIENT[@]} )) && idx=$(( ${#GRADIENT[@]} - 1 ))
+                if (( frame >= frames || RANDOM % frames < frame )); then
+                    printf '\e[38;2;%sm%s' "${GRADIENT[$idx]}" "$c"
+                else
+                    rc="${cs:$((RANDOM % ${#cs})):1}"
+                    printf '\e[38;2;%d;%d;%dm%s' \
+                        "$((80 + RANDOM % 175))" "$((80 + RANDOM % 175))" "$((80 + RANDOM % 175))" "$rc"
+                fi
+            done
+            printf '%s\n' "$NC"
+        done
+        sleep 0.04
+    done
+}
+
+# Glitch: flash the banner with random characters a few times, then settle.
+anim_glitch() {
+    local text="$1"
+    local _fl
+    _figlet_lines "$text" || { printf '  %s\n' "$text"; return; }
+    local n=${#_fl[@]} cols i l c idx
+    cols="$(_max_line_width _fl)"
+    banner_static "$text"
+    local gcs='!@#$%^&*~/\\|<>=+_'
+    local frame
+    for frame in 1 2 3; do
+        sleep 0.07
+        printf '\e[%dA' "$n"
+        for l in "${_fl[@]}"; do
+            printf '\r\e[K  '
+            for ((i=0; i<${#l}; i++)); do
+                c="${l:i:1}"
+                if [[ "$c" == " " ]]; then printf ' '; continue; fi
+                if (( RANDOM % 5 == 0 )); then
+                    local gc="${gcs:$((RANDOM % ${#gcs})):1}"
+                    printf '\e[38;2;%d;%d;%dm%s' \
+                        "$((180 + RANDOM % 75))" "$((RANDOM % 80))" "$((RANDOM % 80))" "$gc"
+                else
+                    idx=$(( i * (${#GRADIENT[@]} - 1) / (cols > 0 ? cols : 1) ))
+                    (( idx >= ${#GRADIENT[@]} )) && idx=$(( ${#GRADIENT[@]} - 1 ))
+                    printf '\e[38;2;%sm%s' "${GRADIENT[$idx]}" "$c"
+                fi
+            done
+            printf '%s\n' "$NC"
+        done
+    done
+    sleep 0.07
+    printf '\e[%dA' "$n"
+    banner_static "$text"
+}
+
+# Matrix rain that condenses into the banner.
+anim_matrix() {
+    local text="$1"
+    local _fl
+    _figlet_lines "$text" || { printf '  %s\n' "$text"; return; }
+    local n=${#_fl[@]} cols i l c idx
+    cols="$(_max_line_width _fl)"
+    local rcs='01アイウエオカキクケコサシスセソタチツテト'
+    local frames=10 frame
+    for ((i=0; i<n; i++)); do printf '\n'; done
+    for ((frame=1; frame<=frames; frame++)); do
+        printf '\e[%dA' "$n"
+        for l in "${_fl[@]}"; do
+            printf '\r\e[K  '
+            for ((i=0; i<${#l}; i++)); do
+                c="${l:i:1}"
+                if (( frame > frames - 3 )); then
+                    [[ "$c" == " " ]] && { printf ' '; continue; }
+                    idx=$(( i * (${#GRADIENT[@]} - 1) / (cols > 0 ? cols : 1) ))
+                    (( idx >= ${#GRADIENT[@]} )) && idx=$(( ${#GRADIENT[@]} - 1 ))
+                    printf '\e[38;2;%sm%s' "${GRADIENT[$idx]}" "$c"
+                else
+                    if (( RANDOM % 2 == 0 )); then
+                        local mc="${rcs:$((RANDOM % ${#rcs})):1}"
+                        printf '\e[38;2;%d;255;%dm%s' "$((RANDOM % 80))" "$((RANDOM % 80))" "$mc"
+                    else
+                        printf ' '
+                    fi
+                fi
+            done
+            printf '%s\n' "$NC"
+        done
+        sleep 0.05
+    done
+}
+
+# Power-on / BIOS boot sequence then the banner.
+anim_boot() {
+    local text="$1"
+    local lines=(
+        "[    0.000000] Linux version $(uname -r)"
+        "[    0.012345] CPU0: $(cpu_model 2>/dev/null | head -c 40)"
+        "[    0.234567] PCI: Probing PCI hardware"
+        "[    1.123456] systemd[1]: Detected virtualization $(virt_type 2>/dev/null || echo bare-metal)"
+        "[    1.234567] systemd[1]: Starting Apply Kernel Variables..."
+        "[    1.345678] systemd[1]: Mounted /sys"
+        "[    1.456789] systemd[1]: Started Network Manager"
+        "[    1.567890] systemd[1]: Started OpenSSH server daemon"
+        "[    1.678901] systemd[1]: Reached target Multi-User System"
+        "[    1.789012] motd[1337]: Initializing nerdy MOTD..."
+    )
+    local l
+    for l in "${lines[@]}"; do
+        printf '%s%s%s\n' "$C_DIM" "$l" "$NC"
+        sleep 0.05
+    done
+    sleep 0.15
+    banner_static "$text"
+}
+
+# Dispatcher.
+banner() {
+    case "$ANIMATE" in
+        matrix)  anim_matrix  "$1" ;;
+        decrypt) anim_decrypt "$1" ;;
+        glitch)  anim_glitch  "$1" ;;
+        type)    anim_typeout "$1" ;;
+        boot)    anim_boot    "$1" ;;
+        *)       banner_static "$1" ;;
+    esac
 }
 
 # =============================================================================
@@ -429,38 +1028,36 @@ draw_bar() {
         "$C_GRAY" "$suffix" "$NC"
 }
 
-# Render the hostname as a big block-letter banner with a horizontal gradient.
-banner() {
-    local text="$1"
-    local lines=()
-    if have figlet; then
-        mapfile -t lines < <(figlet -f standard -w "$WIDTH" -- "$text" 2>/dev/null \
-            || figlet -w "$WIDTH" -- "$text" 2>/dev/null \
-            || printf '%s\n' "$text")
-    else
-        lines=("$text")
+# Animated bar that fills from 0 → pct over ~250 ms.
+draw_bar_animated() {
+    local pct="${1:-0}" bar_w="${2:-24}" suffix="${3:-}"
+    [[ "$pct" =~ ^[0-9]+$ ]] || pct=0
+    (( pct > 100 )) && pct=100
+    local steps=12 i
+    for ((i=1; i<=steps; i++)); do
+        local p=$(( pct * i / steps ))
+        printf '\r     %s%s%s  %s%-12s%s %s' \
+            "$C_PURPLE" "$I_BOLT" "$NC" \
+            "$C_GRAY" "" "$NC" \
+            "$(draw_bar "$p" "$bar_w" "")"
+        sleep 0.015
+    done
+    # Final state with proper suffix (cleared and re-drawn).
+    printf '\r\e[K'
+}
+
+# Mood-Tux glyph based on temperature and load.
+mood_glyph() {
+    local cpu="${1:-0}" temp="${2:-0}"
+    [[ "$cpu" =~ ^[0-9]+$ ]]  || cpu=0
+    [[ "$temp" =~ ^[0-9]+$ ]] || temp=0
+    if   (( temp >= 85 )); then printf '🔥'
+    elif (( temp >= 70 )); then printf '🥵'
+    elif (( cpu  >= 90 )); then printf '😰'
+    elif (( cpu  >= 70 )); then printf '😅'
+    elif (( cpu  >= 40 )); then printf '🙂'
+    else                        printf '😴'
     fi
-    # Trim trailing empty lines.
-    while (( ${#lines[@]} > 0 )) && [[ -z "${lines[-1]// /}" ]]; do
-        unset 'lines[-1]'
-    done
-    local n=${#lines[@]} cols
-    (( n == 0 )) && { printf '  %s%s%s\n' "$BOLD" "$text" "$NC"; return; }
-    # Use the longest line to compute the gradient width.
-    cols=0
-    for l in "${lines[@]}"; do (( ${#l} > cols )) && cols=${#l}; done
-    local i col c
-    for l in "${lines[@]}"; do
-        printf '  '
-        for (( i=0; i<${#l}; i++ )); do
-            c="${l:i:1}"
-            if [[ "$c" == " " ]]; then printf ' '; continue; fi
-            local idx=$(( i * (${#GRADIENT[@]} - 1) / (cols > 0 ? cols : 1) ))
-            (( idx >= ${#GRADIENT[@]} )) && idx=$(( ${#GRADIENT[@]} - 1 ))
-            printf '\e[38;2;%sm%s' "${GRADIENT[$idx]}" "$c"
-        done
-        printf '%s\n' "$NC"
-    done
 }
 
 # =============================================================================
@@ -474,17 +1071,52 @@ render_banner() {
     rule
     printf '\n'
     banner "$host"
-    printf '\n   %s%s  %s%s%s  %s%s%s  %s%s%s\n\n' \
-        "${C_GRAY}" "$(distro_glyph) ${DISTRO_PRETTY}${NC}" \
-        "$C_DIM" "·" "$NC" \
+    printf '\n   %s%s  %s·%s  %s%s%s  %s%s%s  %s·%s  %s%s theme%s\n\n' \
+        "${C_GRAY}$(distro_glyph) ${DISTRO_PRETTY}${NC}" "" \
+        "$C_DIM" "$NC" \
         "$C_PURPLE" "${I_CLOCK}" "$NC" \
-        "$C_FG" "$dt" "$NC"
+        "$C_FG" "$dt" "$NC" \
+        "$C_DIM" "$NC" \
+        "$C_PINK" "$THEME" "$NC"
     rule
+}
+
+# CRITICAL section: only shown if there's something actually wrong.
+render_critical() {
+    local reboot fu_count oom zomb need_show=0
+    reboot="$(reboot_required)"
+    fu_count="$(failed_units_count)"
+    oom="$(oom_kills_24h)"
+    zomb="$(zombie_count)"
+
+    [[ -n "$reboot" ]] && need_show=1
+    (( ${fu_count:-0} > 0 )) && need_show=1
+    (( ${oom:-0} > 0 )) && need_show=1
+    (( ${zomb:-0} > 0 )) && need_show=1
+    (( need_show == 0 )) && return 0
+
+    section "$(printf '%s%s%s  Needs Attention' "$C_RED" "$I_WARN" "$NC")"
+    if [[ -n "$reboot" ]]; then
+        local extra=""
+        (( reboot > 0 )) && extra="${C_GRAY} — ${reboot} packages${NC}"
+        row "$I_REBOOT" "Reboot" "$(pulse "${C_RED}required${NC}")${extra}"
+    fi
+    if (( ${fu_count:-0} > 0 )); then
+        local units
+        units="$(failed_units | head -n3 | tr '\n' ' ' | sed 's/ $//')"
+        row "$I_FAIL" "Units" "${C_RED}${fu_count} failed${NC} ${C_GRAY}${units}${NC}"
+    fi
+    if (( ${oom:-0} > 0 )); then
+        row "$I_FIRE" "OOM 24h" "${C_RED}${oom}${NC} ${C_GRAY}kills${NC}"
+    fi
+    if (( ${zomb:-0} > 0 )); then
+        row "$I_GHOST" "Zombies" "${C_YELLOW}${zomb}${NC}"
+    fi
 }
 
 render_system() {
     section "System"
-    local os_line latest cur
+    local os_line latest cur cpu_m cores threads virt
     cur="$DISTRO_VERSION_ID"
     latest="$(latest_release || true)"
     if [[ -n "$latest" && -n "$cur" && "$latest" != "$cur" ]]; then
@@ -493,80 +1125,190 @@ render_system() {
         os_line="${DISTRO_PRETTY} ${C_GREEN}${I_OK} up to date${NC}"
     fi
     row "$I_OS"     "OS"      "$os_line"
-    row "$I_KERNEL" "Kernel"  "$(uname -r)"
+    row "$I_KERNEL" "Kernel"  "$(uname -r) ${C_GRAY}($(arch_name))${NC}"
+    cpu_m="$(cpu_model)"
+    cores="$(cpu_cores)"
+    threads="$(cpu_threads)"
+    if [[ -n "$cpu_m" ]]; then
+        row "$I_CPU" "CPU" "${cpu_m} ${C_GRAY}— ${cores}c/${threads}t${NC}"
+    fi
+    virt="$(virt_type)"
+    [[ -n "$virt" ]] && row "$I_VIRT" "Virt" "${C_CYAN}${virt}${NC}"
     row "$I_UPTIME" "Uptime"  "$(uptime -p 2>/dev/null | sed 's/^up //')"
-    row "$I_LOAD"   "Load"    "$(awk '{printf "%s · %s · %s", $1, $2, $3}' /proc/loadavg)"
-    local users
-    users="$(who | wc -l)"
-    row "$I_USER"   "Users"   "${users} logged in"
+    local load_spark
+    [[ "$SHOW_SPARKLINES" == "1" ]] && load_spark=" ${C_CYAN}$(load_sparkline)${NC}"
+    row "$I_LOAD"   "Load"    "$(awk '{printf "%s · %s · %s", $1, $2, $3}' /proc/loadavg)${load_spark:-}"
+    local sessions
+    sessions="$(active_ssh_count)"
+    row "$I_USER"   "Sessions" "${sessions} ${C_GRAY}active${NC}"
 }
 
 render_resources() {
     section "Resources"
-    local cpu mem disk temp
+    local cpu mp mu mt dp du dt sp su st temp gpu fan mbtemp smart
     cpu="$(cpu_pct || echo 0)"
     [[ -z "$cpu" ]] && cpu=0
     read -r mp mu mt < <(mem_info)
     read -r dp du dt < <(disk_info /)
+    read -r sp su st < <(swap_info)
     temp="$(cpu_temp_c)"
-    row "$I_CPU"  "CPU"     "$(draw_bar "$cpu"  24 "")"
-    row "$I_RAM"  "Memory"  "$(draw_bar "${mp:-0}" 24 "${mu:-0} / ${mt:-0} GiB")"
+    gpu="$(gpu_info)"
+    fan="$(fan_rpm)"
+    mbtemp="$(mb_temp_c)"
+    smart="$(smart_health)"
+
+    row "$I_CPU"  "CPU"    "$(draw_bar "$cpu"  24 "$(mood_glyph "$cpu" "${temp:-0}")")"
+    row "$I_RAM"  "Memory" "$(draw_bar "${mp:-0}" 24 "${mu:-0} / ${mt:-0} GiB")"
+
+    if [[ "$sp" != "off" && -n "$sp" ]]; then
+        row "$I_SWAP" "Swap"  "$(draw_bar "${sp:-0}" 24 "${su:-0} / ${st:-0} GiB")"
+    fi
+
     row "$I_DISK" "Disk /"  "$(draw_bar "${dp:-0}" 24 "${du:-0} / ${dt:-0} GiB")"
+
+    # Show extra mounts (skip root since already shown). Limit to 3 extras.
+    local count=0
+    while read -r mp_path pct used size; do
+        [[ "$mp_path" == "/" || -z "$mp_path" ]] && continue
+        (( count++ >= 3 )) && break
+        local p="${pct%%%}"
+        row "$I_DISK" "Disk ${mp_path}" "$(draw_bar "$p" 24 "${used} / ${size}")"
+    done < <(all_disks)
+
     if [[ -n "$temp" ]]; then
         local tcol="$C_GREEN"
         (( temp >= 70 )) && tcol="$C_YELLOW"
-        (( temp >= 85 )) && tcol="$C_RED"
-        row "$I_TEMP" "Temp" "${tcol}${temp}°C${NC}"
+        (( temp >= 85 )) && tcol="${BLINK}${C_RED}"
+        local extras=""
+        [[ -n "$mbtemp" ]] && extras+=" ${C_GRAY}· board ${mbtemp}°C${NC}"
+        [[ -n "$fan" ]]    && extras+=" ${C_GRAY}· fan ${fan} RPM${NC}"
+        row "$I_TEMP" "Temp" "${tcol}${temp}°C${NC}${extras}"
+    fi
+
+    if [[ -n "$gpu" ]]; then
+        row "$I_GPU" "GPU" "${C_CYAN}${gpu}${NC}"
+    fi
+
+    if [[ -n "$smart" ]]; then
+        local sc
+        if [[ "$smart" == *FAIL* || "$smart" == *fail* ]]; then sc="$C_RED"
+        else sc="$C_GREEN"
+        fi
+        row "$I_DISK" "SMART" "${sc}${smart}${NC}"
     fi
 }
 
 render_network() {
     section "Network"
-    local v4 v6 ext geo country city geo_label rdns_v4 rdns_ext
+    local v4 v6 ext geo country city ip_line gw dns ls speed_str vpn ping_ms conn lst rx tx iface
     v4="$(ipv4_addr)"
     v6="$(ipv6_addr)"
     ext="$(ext_ip)"
-    rdns_v4="$(rdns "$v4")"
-    rdns_ext="$(rdns "$ext")"
-    [[ -z "$rdns_v4" ]] && rdns_v4="—"
-    [[ -z "$rdns_ext" ]] && rdns_ext="—"
+    gw="$(default_gw)"
+    dns="$(dns_resolver)"
+    vpn="$(vpn_status)"
+    ping_ms="$(ping_latency)"
+    conn="$(conn_count)"
+    lst="$(listen_ports_count)"
 
-    [[ -n "$v4" ]] && row "$I_NET"   "IPv4"     "${v4}  ${C_DIM}→ ${rdns_v4}${NC}"
-    [[ -n "$v6" ]] && row "$I_NET"   "IPv6"     "$v6"
+    [[ -n "$v4" ]] && {
+        local rdv4
+        rdv4="$(rdns "$v4")"; [[ -z "$rdv4" ]] && rdv4="—"
+        row "$I_NET" "IPv4" "${v4}  ${C_DIM}→ ${rdv4}${NC}"
+    }
+    [[ -n "$v6" ]] && row "$I_NET" "IPv6" "$v6"
     if [[ -n "$ext" ]]; then
         geo="$(geoip "$ext")"
-        country="$(geo_country "$geo")"
-        city="$(geo_city "$geo")"
-        geo_label=""
+        country="$(geo_field "$geo" "country")"
+        city="$(geo_field "$geo" "city")"
+        local rdex
+        rdex="$(rdns "$ext")"; [[ -z "$rdex" ]] && rdex="—"
+        local geo_label=""
         [[ -n "$country" ]] && geo_label="${I_FLAG} ${country}"
         [[ -n "$city" ]]    && geo_label="${geo_label} · ${city}"
-        row "$I_GLOBE" "External" "${ext}  ${C_DIM}→ ${rdns_ext}${NC}  ${C_PINK}${geo_label}${NC}"
+        row "$I_GLOBE" "External" "${ext}  ${C_DIM}→ ${rdex}${NC}  ${C_PINK}${geo_label}${NC}"
     fi
+    [[ -n "$gw" ]]  && row "$I_GATE" "Gateway" "$gw"
+    [[ -n "$dns" ]] && row "$I_DNS"  "DNS"     "$dns"
+
+    ls="$(link_speed_mbps)"
+    if [[ -n "$ls" ]]; then
+        read -r iface speed_str <<<"$ls"
+        local lc="$C_GREEN"
+        (( speed_str < 100 )) && lc="$C_YELLOW"
+        (( speed_str < 10  )) && lc="$C_RED"
+        row "$I_LINK" "Link" "${iface} ${C_GRAY}@${NC} ${lc}${speed_str} Mbit/s${NC}"
+    fi
+
+    if [[ -n "$ping_ms" ]]; then
+        local pc="$C_GREEN"
+        local ms_int=${ping_ms%.*}
+        (( ms_int > 50 ))  && pc="$C_YELLOW"
+        (( ms_int > 200 )) && pc="$C_RED"
+        row "$I_PING" "Ping" "${pc}${ping_ms} ms${NC} ${C_GRAY}to ${PING_HOST}${NC}"
+    fi
+
+    read -r rx tx < <(net_traffic)
+    if [[ -n "${rx:-}" && "$rx" != "0" ]]; then
+        row "$I_NET" "Traffic" "${C_TEAL}${I_DOWN} $(fmt_bytes "$rx")${NC}  ${C_PINK}${I_UP} $(fmt_bytes "$tx")${NC}  ${C_GRAY}since boot${NC}"
+    fi
+
+    if [[ -n "$conn" || -n "$lst" ]]; then
+        row "$I_NET" "Sockets" "${C_FG}${conn:-0}${NC} ${C_GRAY}est.${NC}  ${C_FG}${lst:-0}${NC} ${C_GRAY}listening${NC}"
+    fi
+
+    [[ -n "$vpn" ]] && row "$I_VPN" "VPN" "${C_GREEN}${vpn}${NC}"
 }
 
 render_security() {
-    local fail2 ssh tor
+    local fail2 ssh tor ufw mac ntp need=0
     fail2="$(fail2ban_summary)"
     ssh="$(failed_ssh_24h || echo 0)"
     tor="$(tor_status)"
-    # Only show if at least one source has data.
-    if [[ -z "$fail2" && -z "$tor" && "${ssh:-0}" -eq 0 ]]; then
-        return 0
-    fi
+    ufw="$(ufw_status)"
+    mac="$(mac_status)"
+    ntp="$(ntp_status)"
+    local sessions
+    mapfile -t sessions < <(active_ssh_sessions)
+
+    [[ -n "$fail2" ]] && need=1
+    [[ -n "$tor" ]] && need=1
+    [[ -n "$ufw" ]] && need=1
+    [[ -n "$mac" ]] && need=1
+    [[ -n "$ntp" ]] && need=1
+    (( ssh > 0 )) && need=1
+    (( ${#sessions[@]} > 0 )) && need=1
+    (( need == 0 )) && return 0
+
     section "Security"
     if [[ -n "$fail2" ]]; then
         read -r jails banned <<<"$fail2"
         row "$I_SHIELD" "Fail2Ban" "${C_GREEN}${I_OK} active${NC}  ${C_GRAY}— ${jails} jails, ${banned} banned${NC}"
     fi
-    if [[ -n "${ssh:-}" ]]; then
+    if (( ssh > 0 )); then
         local col="$C_GREEN"
         (( ssh > 10 )) && col="$C_YELLOW"
         (( ssh > 50 )) && col="$C_RED"
-        row "$I_LOCK" "SSH (24h)" "${col}${ssh}${NC} ${C_GRAY}failed attempts${NC}"
+        local spark=""
+        [[ "$SHOW_SPARKLINES" == "1" ]] && spark=" ${C_DIM}$(ssh_history_sparkline)${NC}"
+        row "$I_LOCK" "SSH (24h)" "${col}${ssh}${NC} ${C_GRAY}failed${NC}${spark}"
+    fi
+    if (( ${#sessions[@]} > 0 )); then
+        row "$I_KEY" "Active" "${C_TEAL}${sessions[*]}${NC}"
+    fi
+    if [[ -n "$ufw" ]]; then
+        local uc="$C_GREEN"; [[ "$ufw" == *inactive* ]] && uc="$C_YELLOW"
+        row "$I_SHIELD" "UFW" "${uc}${ufw}${NC}"
+    fi
+    if [[ -n "$mac" ]]; then
+        row "$I_SHIELD" "MAC" "${C_BLUE}${mac}${NC}"
+    fi
+    if [[ -n "$ntp" ]]; then
+        local nc; [[ "$ntp" == "synced" ]] && nc="$C_GREEN" || nc="$C_RED"
+        row "$I_CLOCK" "NTP" "${nc}${ntp}${NC}"
     fi
     if [[ -n "$tor" ]]; then
-        local state="${tor%% *}"
-        if [[ "$state" == "active" ]]; then
+        if [[ "$tor" == "active" ]]; then
             row "$I_TOR" "Tor" "${C_GREEN}${I_OK} active${NC}"
         else
             row "$I_TOR" "Tor" "${C_RED}${I_FAIL} inactive${NC}"
@@ -587,6 +1329,40 @@ render_updates() {
     row "$I_LOCK"   "Security"  "${col}${sec}${NC} ${C_GRAY}critical${NC}"
 }
 
+render_certs() {
+    [[ -z "$CERT_DOMAINS" ]] && return 0
+    section "TLS Certificates"
+    local d days col
+    for d in $CERT_DOMAINS; do
+        days="$(tls_expiry_days "$d")"
+        if [[ -z "$days" ]]; then
+            row "$I_CERT" "$d" "${C_GRAY}— unreachable${NC}"
+            continue
+        fi
+        col="$C_GREEN"
+        (( days < 30 )) && col="$C_YELLOW"
+        (( days < 7  )) && col="$C_RED"
+        row "$I_CERT" "$d" "${col}${days} days${NC}"
+    done
+}
+
+render_schedule() {
+    local backup next show=0
+    backup="$(last_backup_human)"
+    next="$(next_scheduled)"
+    [[ -n "$backup" ]] && show=1
+    [[ -n "$next" ]] && show=1
+    (( show == 0 )) && return 0
+
+    section "Schedule"
+    if [[ -n "$backup" ]]; then
+        row "$I_BACKUP" "Backup" "${C_FG}${backup}${NC} ${C_GRAY}— ${BACKUP_PATH}${NC}"
+    fi
+    if [[ -n "$next" ]]; then
+        row "$I_CRON" "Next job" "${C_FG}${next}${NC}"
+    fi
+}
+
 render_containers() {
     local d
     d="$(docker_status)"
@@ -598,8 +1374,6 @@ render_containers() {
 
 render_lastlogin() {
     local line user term ip when
-    # First non-current, non-reboot, non-wtmp-footer entry. `last -F` prints
-    # the full timestamp as "Day Mon DD HH:MM:SS YYYY" in fields 4..8.
     line="$(last -i -F 2>/dev/null \
         | awk '$1 != "" && $1 != "reboot" && $1 != "wtmp" && $0 !~ /still logged in/ {print; exit}')"
     [[ -z "$line" ]] && return 0
@@ -608,9 +1382,9 @@ render_lastlogin() {
     ip="$(awk '{print $3}' <<<"$line")"
     when="$(awk '{print $4, $5, $6, $7, $8}' <<<"$line")"
     section "Last Login"
-    row "$I_USER" "User"     "${BOLD}${user}${NC}  ${C_GRAY}via ${term}${NC}"
-    row "$I_NET"  "From"     "${ip:-—}"
-    row "$I_LAST" "When"     "$when"
+    row "$I_USER" "User" "${BOLD}${user}${NC}  ${C_GRAY}via ${term}${NC}"
+    row "$I_NET"  "From" "${ip:-—}"
+    row "$I_LAST" "When" "$when"
 }
 
 render_processes() {
@@ -625,11 +1399,13 @@ render_processes() {
 
 render_footer() {
     rule
-    local w q
+    local w q f
     w="$(weather_line)"
     q="$(random_quote)"
+    f="$(funfact)"
     [[ -n "$w" ]] && printf '   %s%s%s  %s%s%s\n' "$C_BLUE" "$I_WEATHER" "$NC" "$C_CYAN" "$w" "$NC"
-    [[ -n "$q" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PURPLE" "$I_BOLT" "$NC" "$C_DIM" "$q" "$NC"
+    [[ -n "$f" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PINK"  "$I_CLOCK"   "$NC" "$C_DIM"  "$f" "$NC"
+    [[ -n "$q" ]] && printf '   %s%s%s  %s%s%s\n' "$C_PURPLE" "$I_BOLT"   "$NC" "$C_DIM"  "$q" "$NC"
 }
 
 # =============================================================================
@@ -638,11 +1414,14 @@ render_footer() {
 
 main() {
     render_banner
+    render_critical
     render_system
     render_resources
     render_network
     render_security
     render_updates
+    render_certs
+    render_schedule
     render_containers
     render_lastlogin
     render_processes
